@@ -79,9 +79,9 @@ def format_transcript(segments: list[dict]) -> str:
         raise
 
 
-def parse_llm_response(response_text: str) -> list[dict]:
+def parse_llm_response(response_text: str) -> tuple[list[dict], str]:
     """
-    Parses and validates LLM response as JSON array of clips.
+    Parses and validates LLM response as a JSON object containing clips.
     
     Removes markdown code fences if present, validates JSON structure,
     ensures all clips have required fields with correct types and values.
@@ -90,11 +90,13 @@ def parse_llm_response(response_text: str) -> list[dict]:
         response_text: Raw text response from LLM
         
     Returns:
-        List of dicts: [{"start": float, "end": float, "label": str}, ...]
+        Tuple of (clips list, music style string)
         
     Raises:
         ValueError: If parsing fails or any validation check fails
     """
+    allowed_music_styles = {"phonk", "lofi", "epic", "chill", "upbeat"}
+
     try:
         # Strip and clean the response text
         cleaned = response_text.strip()
@@ -115,11 +117,24 @@ def parse_llm_response(response_text: str) -> list[dict]:
         logger.debug(f"Cleaned LLM response for parsing: {cleaned[:100]}...")
         
         # Parse JSON from cleaned text
-        clips = json.loads(cleaned)
+        result = json.loads(cleaned)
         
-        # Validate that result is a list
+        # Validate that result is an object with clips and music_style keys
+        if not isinstance(result, dict):
+            raise ValueError("LLM response must be a JSON object, got: " + str(type(result)))
+
+        if "clips" not in result:
+            raise ValueError("LLM response missing required 'clips' field")
+
+        clips = result["clips"]
+        music_style = result.get("music_style", "lofi")
+
+        if not isinstance(music_style, str) or music_style not in allowed_music_styles:
+            music_style = "lofi"
+
+        # Validate that clips is a list
         if not isinstance(clips, list):
-            raise ValueError("LLM response must be a JSON array, got: " + str(type(clips)))
+            raise ValueError("LLM response 'clips' must be a JSON array, got: " + str(type(clips)))
         
         # Validate each clip in the array
         for i, clip in enumerate(clips):
@@ -143,15 +158,16 @@ def parse_llm_response(response_text: str) -> list[dict]:
             if not isinstance(clip["label"], str):
                 raise ValueError(f"Clip {i} 'label' must be string, got {type(clip['label'])}")
             
-            # Validate start < end for valid time range
-            if clip["start"] >= clip["end"]:
+            # Allow equal timestamps here so the repair step can expand zero-length
+            # LLM outputs into valid clip windows before strict validation runs.
+            if clip["start"] > clip["end"]:
                 raise ValueError(
-                    f"Clip {i} has invalid time range: start ({clip['start']}) >= end ({clip['end']})"
+                    f"Clip {i} has invalid time range: start ({clip['start']}) > end ({clip['end']})"
                 )
         
-        # All validation passed
-        logger.info(f"Successfully parsed and validated {len(clips)} clips from LLM response")
-        return validate_clip_bounds(clips)
+        # Parsing succeeded; strict clip bounds are enforced after repair.
+        logger.info(f"Successfully parsed {len(clips)} clips from LLM response")
+        return clips, music_style
         
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}") from e
@@ -159,7 +175,55 @@ def parse_llm_response(response_text: str) -> list[dict]:
         raise
 
 
-def analyze_transcript(segments: list[dict], guidance: str = None) -> list[dict]:
+def _repair_analyzed_clips(clips: list[dict], segments: list[dict]) -> list[dict]:
+    """
+    Repairs LLM-produced clip bounds so they satisfy the downstream validator.
+
+    The LLM can occasionally return very short or zero-length ranges even when the
+    prompt asks for 30-180 second clips. This helper expands those clips to a valid
+    window while preserving their ordering and avoiding overlap.
+    """
+    if not segments:
+        raise ValueError("No transcript segments available to repair clips")
+
+    transcript_end = max(float(segment["end"]) for segment in segments)
+    repaired_clips: list[dict] = []
+
+    for index, clip in enumerate(sorted(clips, key=lambda item: float(item["start"]))):
+        start = float(clip["start"])
+        end = float(clip["end"])
+        label = str(clip["label"])
+
+        if repaired_clips and start < repaired_clips[-1]["end"]:
+            start = repaired_clips[-1]["end"]
+
+        if end <= start:
+            end = start + 30.0
+
+        duration = end - start
+        if duration < 30.0:
+            end = start + 30.0
+        elif duration > 180.0:
+            end = start + 180.0
+
+        if end > transcript_end:
+            end = transcript_end
+            start = max(0.0, end - 30.0)
+
+        if repaired_clips and start < repaired_clips[-1]["end"]:
+            start = repaired_clips[-1]["end"]
+
+        if end <= start or end - start < 30.0:
+            raise ValueError(
+                f"Clip {index} could not be repaired into a valid 30-180s range"
+            )
+
+        repaired_clips.append({"start": start, "end": end, "label": label})
+
+    return validate_clip_bounds(repaired_clips)
+
+
+def analyze_transcript(segments: list[dict], guidance: str = None) -> tuple[list[dict], str]:
     """
     Analyzes transcript segments to identify 4-5 key video clips.
     
@@ -178,7 +242,7 @@ def analyze_transcript(segments: list[dict], guidance: str = None) -> list[dict]
         guidance: Optional user instruction string (None = Auto Mode)
         
     Returns:
-        List of 4-5 dicts: [{"start": float, "end": float, "label": str}, ...]
+        Tuple of (clips list, music style string)
         
     Raises:
         RuntimeError: If LLM analysis fails or JSON parsing fails twice
@@ -217,14 +281,27 @@ Rules:
 - Clips must NOT overlap with each other
 - Prefer segments where the speaker explains a key concept, gives a main point, 
   or delivers important information
-- Return ONLY a valid JSON array. No explanation. No markdown. No extra text.
+- Return ONLY a valid JSON object. No explanation. No markdown. No extra text.
 - Timestamps must be in seconds as floats (e.g. 45.0, not "0:45")
 
+Also select the most fitting background music style for this video content.
+Choose ONE from: phonk, lofi, epic, chill, upbeat
+Base your choice on the video's energy and topic:
+- phonk: high-energy, intense, action content
+- lofi: calm study, educational, slow-paced explanations
+- epic: motivational, achievement, big announcements
+- chill: lifestyle, casual, conversational
+- upbeat: product demos, tutorials, tech content
+Return the result as a JSON object with 'music_style' and 'clips' keys.
+
 Output format (return ONLY this JSON, nothing else):
-[
-  {"start": 45.2, "end": 98.7, "label": "Main concept explained"},
-  {"start": 134.0, "end": 187.3, "label": "Key example given"}
-]"""
+{
+    "music_style": "phonk",
+    "clips": [
+        {"start": 45.2, "end": 98.7, "label": "Main concept explained"},
+        {"start": 134.0, "end": 187.3, "label": "Key example given"}
+    ]
+}"""
         
         # Build user message with formatted transcript
         user_message = f"Analyze this transcript and identify the best clips:\n\n{formatted_transcript}"
@@ -251,9 +328,10 @@ Output format (return ONLY this JSON, nothing else):
         
         # Try to parse response into clips
         try:
-            clips = parse_llm_response(response_text)
+            clips, music_style = parse_llm_response(response_text)
+            clips = _repair_analyzed_clips(clips, segments)
             logger.info(f"First LLM call succeeded: {len(clips)} clips extracted")
-            return clips
+            return clips, music_style
             
         except ValueError as parse_error:
             # First parse failed, log warning and proceed to retry
@@ -266,7 +344,7 @@ Output format (return ONLY this JSON, nothing else):
             # Create stricter system prompt that emphasizes JSON-only output
             stricter_system = (
                 system_prompt 
-                + "\n\nIMPORTANT: Return ONLY raw JSON array. No text before or after. "
+                + "\n\nIMPORTANT: Return ONLY raw JSON object. No text before or after. "
                 + "No markdown. No explanation. ONLY JSON."
             )
             
@@ -287,9 +365,10 @@ Output format (return ONLY this JSON, nothing else):
             
             # Try to parse second response
             try:
-                clips = parse_llm_response(response_text2)
+                clips, music_style = parse_llm_response(response_text2)
+                clips = _repair_analyzed_clips(clips, segments)
                 logger.info(f"Second LLM call succeeded: {len(clips)} clips extracted")
-                return clips
+                return clips, music_style
                 
             except ValueError as parse_error2:
                 # Both attempts failed - give up and raise error
@@ -309,6 +388,79 @@ Output format (return ONLY this JSON, nothing else):
         error_msg = f"Unexpected error during transcript analysis: {str(e)}"
         logger.error(error_msg)
         raise RuntimeError(error_msg) from e
+
+
+def score_clips(clips: list[dict], all_segments: list[dict]) -> list[dict]:
+    """
+    Adds a heuristic quality score to each clip based on transcript content.
+
+    The score is computed locally without any API calls and is clamped to the
+    0-100 range.
+    """
+    signals = [
+        "important",
+        "key",
+        "main",
+        "because",
+        "result",
+        "conclusion",
+        "example",
+        "first",
+        "finally",
+        "therefore",
+        "means",
+        "shows",
+        "proves",
+        "actually",
+        "critical",
+        "essential",
+        "significant",
+    ]
+    questions = ["what", "why", "how", "when", "which"]
+    fillers = ["um", "uh", "like", "you know", "basically", "literally"]
+
+    for clip in clips:
+        overlap_segments = [
+            segment
+            for segment in all_segments
+            if segment["start"] < clip["end"] and segment["end"] > clip["start"]
+        ]
+        clip_text = " ".join(segment["text"] for segment in overlap_segments).lower()
+
+        score = 50
+        word_count = len(clip_text.split())
+
+        if word_count > 80:
+            score += 10
+        elif word_count > 40:
+            score += 5
+        if word_count < 15:
+            score -= 10
+
+        signal_score = 0
+        for signal in signals:
+            signal_score += clip_text.count(signal) * 3
+        score += min(20, signal_score)
+
+        question_score = 0
+        for question in questions:
+            question_score += clip_text.count(question) * 2
+        score += min(10, question_score)
+
+        for filler in fillers:
+            score -= clip_text.count(filler) * 2
+
+        clip_duration = clip["end"] - clip["start"]
+        if 60 <= clip_duration <= 120:
+            score += 10
+        elif 30 <= clip_duration < 60:
+            score += 5
+        elif clip_duration > 180:
+            score -= 5
+
+        clip["quality_score"] = int(min(100, max(0, score)))
+
+    return clips
 
 
 if __name__ == "__main__":

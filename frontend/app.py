@@ -1,288 +1,499 @@
 """
-Streamlit frontend for VideoClipper.
-This app uploads a video, starts processing, polls job status, and downloads clips.
+VideoClipper Frontend - Streamlit Application
+User interface for video uploading, processing status tracking, and clip download
 """
 
 import os
 import time
+from datetime import datetime
+from pathlib import Path
 
 import requests
 import streamlit as st
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
-
-# Configure the Streamlit page before any other Streamlit calls are made.
-st.set_page_config(page_title="VideoClipper", page_icon="🎬", layout="centered")
-
-
-# Define the backend base URL and other app-wide constants.
+# Get backend URL from environment or use default
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-ALLOWED_VIDEO_TYPES = ["mp4", "mov", "avi", "mkv"]
-POLL_INTERVAL_SECONDS = 3
 
-
-# Initialize the session state variables used to track the current job.
-def initialize_session_state() -> None:
-	"""Creates the session state keys used by the app if they do not exist."""
-	if "job_id" not in st.session_state:
-		st.session_state.job_id = None
-	if "processing" not in st.session_state:
-		st.session_state.processing = False
-	if "status_data" not in st.session_state:
-		st.session_state.status_data = None
-
-
-# Clear the current processing session so the user can start over.
-def reset_session_state() -> None:
-	"""Resets the app state back to the initial upload screen."""
-	st.session_state.job_id = None
-	st.session_state.processing = False
-	st.session_state.status_data = None
-	if "video_uploader" in st.session_state:
-		del st.session_state["video_uploader"]
-
-
-# Call the backend to start processing the uploaded video.
-def start_processing(video_file, guidance_text: str) -> None:
-	"""Uploads the selected video to the backend and stores the returned job ID."""
-	try:
-		# Validate inputs
-		if not video_file:
-			st.error("No video file selected")
-			return
-		
-		if not guidance_text or not isinstance(guidance_text, str):
-			guidance_text = ""
-		
-		# Truncate guidance if needed
-		if len(guidance_text) > 500:
-			guidance_text = guidance_text[:500]
-			st.warning("Guidance text truncated to 500 characters")
-		
-		# Read the file bytes once so they can be sent as multipart form data.
-		try:
-			file_bytes = video_file.getvalue()
-		except Exception as e:
-			st.error(f"Failed to read video file: {e}")
-			return
-		
-		files = {"video": (video_file.name, file_bytes, "video/mp4")}
-		data = {"guidance": guidance_text}
-
-		# Send the upload request to the FastAPI backend and wait for the job response.
-		response = requests.post(
-			f"{BACKEND_URL}/process",
-			files=files,
-			data=data,
-			timeout=300,
-		)
-
-		# Surface any backend validation or processing errors to the user.
-		if response.status_code >= 400:
-			try:
-				detail = response.json().get("detail", "Upload failed")
-			except ValueError:
-				detail = "Upload failed"
-			st.error(detail)
-			return
-
-		# Store the returned job ID so the app can poll for progress.
-		payload = response.json()
-		st.session_state.job_id = payload.get("job_id")
-		st.session_state.processing = True
-		st.session_state.status_data = None
-		st.rerun()
-
-	except requests.exceptions.RequestException as exc:
-		st.error(f"Upload failed: {exc}")
-	except ValueError:
-		st.error("Upload failed")
-
-
-# Fetch the latest job status from the backend.
-def fetch_job_status(job_id: str):
-	"""Returns the current status payload for a job or None if the server is unavailable."""
-	try:
-		# Validate job_id
-		if not job_id or not isinstance(job_id, str):
-			st.error("Invalid job ID")
-			return None
-		
-		# Ask the backend for the latest job status.
-		response = requests.get(f"{BACKEND_URL}/status/{job_id}", timeout=10)
-
-		# Treat non-success responses as a backend error and show the message when possible.
-		if response.status_code >= 400:
-			try:
-				st.error(response.json().get("detail", "Failed to fetch status"))
-			except ValueError:
-				st.error("Failed to fetch status")
-			return None
-
-		# Return the parsed status dictionary for rendering.
-		return response.json()
-
-	except requests.exceptions.RequestException:
-		st.warning("Waiting for server...")
-		return None
-
-
-# Download a generated clip from the backend as raw bytes.
-def fetch_clip_bytes(job_id: str, filename: str):
-	"""Downloads a clip file and returns its bytes, or None if the request fails."""
-	try:
-		# Validate inputs
-		if not job_id or not filename:
-			st.error("Invalid job ID or filename")
-			return None
-		
-		# Sanitize filename to prevent path traversal
-		filename = filename.strip()
-		if "/" in filename or "\\" in filename or ".." in filename:
-			st.error("Invalid filename")
-			return None
-		
-		# Stream the file so the backend response can be used directly as download content.
-		response = requests.get(
-			f"{BACKEND_URL}/download/{job_id}/{filename}",
-			stream=True,
-			timeout=60,
-		)
-
-		# Reject non-success responses and surface the backend message if available.
-		if response.status_code >= 400:
-			try:
-				st.error(response.json().get("detail", "Download failed"))
-			except ValueError:
-				st.error("Download failed")
-			return None
-
-		# Return the full file contents so Streamlit can use them in a download button.
-		return response.content
-
-	except requests.exceptions.RequestException as exc:
-		st.error(f"Download failed: {exc}")
-		return None
-
-
-# Build a human-readable duration caption from a clip duration in seconds.
-def format_duration(duration_seconds: float) -> str:
-	"""Formats seconds as a compact minutes-and-seconds caption."""
-	minutes = int(duration_seconds // 60)
-	seconds = int(duration_seconds % 60)
-	return f"Duration: {minutes}m {seconds}s"
-
-
-# Run the app setup before rendering any UI content.
-initialize_session_state()
-
-
-# Render the header section for the app.
-st.title("🎬 VideoClipper")
-st.caption("Upload a video. Get the best clips. Powered by AI.")
-st.divider()
-
-
-# Render the upload section where the user chooses a source video.
-uploaded_video = st.file_uploader(
-	"Upload your video (max 500MB)",
-	type=ALLOWED_VIDEO_TYPES,
-	key="video_uploader",
+# Page configuration
+st.set_page_config(
+    page_title="VideoClipper 🎬",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# Custom CSS for better styling
+st.markdown(
+    """
+    <style>
+    .main-header {
+        text-align: center;
+        padding: 20px 0;
+        border-bottom: 2px solid #FF0000;
+    }
+    .status-badge {
+        padding: 5px 10px;
+        border-radius: 5px;
+        font-weight: bold;
+        display: inline-block;
+    }
+    .status-processing {
+        background-color: #FFA500;
+        color: white;
+    }
+    .status-done {
+        background-color: #28a745;
+        color: white;
+    }
+    .status-error {
+        background-color: #dc3545;
+        color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# Render the mode selection controls only after a file has been uploaded.
-guidance_text = ""
-selected_mode = "auto"
-if uploaded_video is not None:
-	st.subheader("Select Mode")
-	selected_mode = st.radio(
-		"Choose how the AI should pick clips",
-		[
-			"🤖 Auto Mode — AI decides what's important",
-			"🎯 Guided Mode — You tell the AI what to find",
-		],
-		horizontal=True,
-		label_visibility="collapsed",
-	)
-
-	# Show the guidance prompt only when the user chooses guided mode.
-	if selected_mode.startswith("🎯 Guided Mode"):
-		guidance_text = st.text_input(
-			"What should the AI look for?",
-			placeholder="e.g. find the parts about machine learning, or highlight the key arguments",
-		)
-
-
-# Start processing only when a file is present and the user clicks the process button.
-if uploaded_video is not None:
-	if st.button("⚡ Process Video"):
-		guidance_value = guidance_text if selected_mode.startswith("🎯 Guided Mode") else ""
-		start_processing(uploaded_video, guidance_value)
-
-
-# If a job is active, always refresh the latest status before deciding what to show.
-if st.session_state.job_id:
-	latest_status = fetch_job_status(st.session_state.job_id)
-	if latest_status is not None:
-		st.session_state.status_data = latest_status
-		st.session_state.processing = latest_status.get("status") not in {"done", "error"}
-
-
-# Render the progress section while the job is still running.
-if st.session_state.job_id and st.session_state.status_data:
-	current_status = st.session_state.status_data.get("status")
-	if current_status not in {"done", "error"}:
-		st.info(st.session_state.status_data.get("current_step", "Processing..."))
-		st.progress(st.session_state.status_data.get("progress", 0) / 100)
-		st.caption("This may take 1–3 minutes depending on video length")
-		time.sleep(POLL_INTERVAL_SECONDS)
-		st.rerun()
+# Initialize session state
+if "job_id" not in st.session_state:
+    st.session_state.job_id = None
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+if "last_status_check" not in st.session_state:
+    st.session_state.last_status_check = None
 
 
-# Render the results section once the backend marks the job as complete.
-if st.session_state.job_id and st.session_state.status_data:
-	current_status = st.session_state.status_data.get("status")
-	if current_status == "done":
-		st.success("✅ Your clips are ready!")
-		st.subheader("Download Your Clips")
-
-		# Display each clip with its duration and an individual download button.
-		for clip in st.session_state.status_data.get("clips", []):
-			st.markdown(f"**{clip['label']}**")
-
-			col1, col2 = st.columns([3, 1])
-			with col1:
-				st.caption(format_duration(clip["duration"]))
-			with col2:
-				clip_bytes = fetch_clip_bytes(st.session_state.job_id, clip["filename"])
-				if clip_bytes is not None:
-					st.download_button(
-						label="⬇ Download",
-						data=clip_bytes,
-						file_name=clip["filename"],
-						mime="video/mp4",
-						key=f"download_{st.session_state.job_id}_{clip['filename']}",
-					)
-
-			st.divider()
-
-		# Let the user clear the current job and upload another video.
-		if st.button("Process another video"):
-			reset_session_state()
-			st.rerun()
+def check_backend_health():
+    """Check if backend is running"""
+    try:
+        response = requests.get(f"{BACKEND_URL}/health", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 
-# Render the error section if the backend reports a failed job.
-if st.session_state.job_id and st.session_state.status_data:
-	current_status = st.session_state.status_data.get("status")
-	if current_status == "error":
-		error_message = st.session_state.status_data.get("error", "Unknown error")
-		st.error(f"❌ Something went wrong: {error_message}")
+def upload_video(video_file, guidance, generate_shorts):
+    """Upload and process a video file"""
+    try:
+        files = {"video": video_file}
+        data = {
+            "guidance": guidance,
+            "shorts_mode": "true" if generate_shorts else "false",
+        }
 
-		# Let the user reset the app state after a failure.
-		if st.button("Try Again"):
-			reset_session_state()
-			st.rerun()
+        response = requests.post(
+            f"{BACKEND_URL}/process",
+            files=files,
+            data=data,
+            timeout=30,
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            st.session_state.job_id = result["job_id"]
+            st.success("✅ Video processing started!")
+            return result["job_id"]
+        else:
+            error_detail = response.json().get("detail", "Unknown error")
+            st.error(f"❌ Failed to process video: {error_detail}")
+            return None
+
+    except requests.exceptions.Timeout:
+        st.error("❌ Request timed out. Please try again.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Error uploading video: {str(e)}")
+        return None
+
+
+def process_youtube_url(youtube_url, guidance, generate_shorts):
+    """Process a YouTube video"""
+    try:
+        data = {
+            "youtube_url": youtube_url,
+            "guidance": guidance,
+            "shorts_mode": "true" if generate_shorts else "false",
+        }
+
+        response = requests.post(
+            f"{BACKEND_URL}/process-url",
+            data=data,
+            timeout=30,
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            st.session_state.job_id = result["job_id"]
+            st.success("✅ YouTube video processing started!")
+            return result["job_id"]
+        else:
+            error_detail = response.json().get("detail", "Unknown error")
+            st.error(f"❌ Failed to process YouTube URL: {error_detail}")
+            return None
+
+    except requests.exceptions.Timeout:
+        st.error("❌ Request timed out. Please try again.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Error processing YouTube URL: {str(e)}")
+        return None
+
+
+def get_job_status(job_id):
+    """Get the current status of a processing job"""
+    try:
+        response = requests.get(f"{BACKEND_URL}/status/{job_id}", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"❌ Error fetching job status: {str(e)}")
+        return None
+
+
+def download_clip(job_id, filename, is_shorts=False):
+    """Download a generated clip"""
+    try:
+        if is_shorts:
+            url = f"{BACKEND_URL}/download-shorts/{job_id}/{filename}"
+        else:
+            url = f"{BACKEND_URL}/download/{job_id}/{filename}"
+
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            return response.content
+        else:
+            return None
+    except Exception as e:
+        st.error(f"❌ Error downloading clip: {str(e)}")
+        return None
+
+
+def cleanup_job(job_id):
+    """Clean up a finished job"""
+    try:
+        response = requests.delete(f"{BACKEND_URL}/cleanup/{job_id}", timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def get_video_info(youtube_url):
+    """Get video info from YouTube URL"""
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/video-info",
+            params={"url": youtube_url},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception:
+        return None
+
+
+# Main application
+def main():
+    """Main Streamlit application"""
+
+    # Header
+    st.markdown(
+        '<div class="main-header"><h1>🎬 VideoClipper - AI-Powered Video Clip Generator</h1></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Check backend health
+    if not check_backend_health():
+        st.error(
+            "❌ Backend service is not available. Please make sure the backend is running at "
+            f"{BACKEND_URL}"
+        )
+        st.info(
+            "Start the backend with: `cd backend && python main.py`"
+        )
+        return
+
+    # Sidebar
+    with st.sidebar:
+        st.title("Options")
+
+        # Mode selection
+        mode = st.radio(
+            "Processing Mode",
+            ["Upload Video", "YouTube URL"],
+            help="Choose between uploading a local video or processing a YouTube video",
+        )
+
+        # Guidance text
+        guidance = st.text_area(
+            "Guidance (optional)",
+            placeholder="Describe what kind of clips you want to extract (e.g., 'funny moments', 'educational content')",
+            max_chars=500,
+            help="Provide optional guidance to the AI for clip selection",
+        )
+
+        # Shorts mode
+        generate_shorts = st.checkbox(
+            "Generate YouTube Shorts (9:16)",
+            value=False,
+            help="Also create vertical format clips suitable for YouTube Shorts",
+        )
+
+    # Main content area
+    if st.session_state.job_id is None:
+        # Initial upload interface
+        st.subheader("Upload and Process Your Video")
+
+        if mode == "Upload Video":
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                video_file = st.file_uploader(
+                    "Choose a video file",
+                    type=["mp4", "mov", "avi", "mkv"],
+                    help="Maximum file size: 500MB",
+                )
+
+            with col2:
+                if st.button(
+                    "🚀 Process Video",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    if video_file is not None:
+                        with st.spinner("Uploading video..."):
+                            job_id = upload_video(
+                                video_file, guidance, generate_shorts
+                            )
+                            if job_id:
+                                st.rerun()
+                    else:
+                        st.warning("Please select a video file first")
+
+            st.info(
+                "💡 Supported formats: MP4, MOV, AVI, MKV (max 500MB)"
+            )
+
+        else:  # YouTube URL mode
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                youtube_url = st.text_input(
+                    "YouTube URL",
+                    placeholder="https://www.youtube.com/watch?v=...",
+                    help="Paste a valid YouTube URL",
+                )
+
+            with col2:
+                if st.button(
+                    "🚀 Process URL",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    if youtube_url:
+                        with st.spinner("Validating YouTube URL..."):
+                            job_id = process_youtube_url(
+                                youtube_url, guidance, generate_shorts
+                            )
+                            if job_id:
+                                st.rerun()
+                    else:
+                        st.warning("Please enter a YouTube URL first")
+
+            if youtube_url:
+                # Show video info if URL is provided
+                with st.spinner("Fetching video information..."):
+                    info = get_video_info(youtube_url)
+                    if info:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Title", info.get("title", "N/A")[:30] + "...")
+                        with col2:
+                            duration = info.get("duration", 0)
+                            minutes = duration // 60
+                            st.metric("Duration", f"{minutes} min")
+                        with col3:
+                            st.metric(
+                                "Channel",
+                                info.get("uploader", "N/A")[:20] + "...",
+                            )
+
+    else:
+        # Status tracking and results
+        job_id = st.session_state.job_id
+
+        # Header with job ID
+        st.subheader(f"Processing Job: {job_id[:8]}...")
+
+        # Status refresh button
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("🔄 Refresh Status", use_container_width=True):
+                st.rerun()
+
+        with col2:
+            if st.button("🏠 New Job", use_container_width=True):
+                st.session_state.job_id = None
+                cleanup_job(job_id)
+                st.rerun()
+
+        # Get current status
+        with st.spinner("Fetching job status..."):
+            status_data = get_job_status(job_id)
+
+        if status_data is None:
+            st.error("❌ Could not fetch job status. Job may have expired.")
+            if st.button("Start New Job"):
+                st.session_state.job_id = None
+                st.rerun()
+            return
+
+        # Display status
+        status = status_data.get("status", "unknown")
+        progress = status_data.get("progress", 0)
+        message = status_data.get("message", "Processing...")
+
+        # Status badge
+        if status == "done":
+            status_color = "status-done"
+            status_text = "✅ COMPLETED"
+        elif status in ["error", "failed"]:
+            status_color = "status-error"
+            status_text = "❌ ERROR"
+        else:
+            status_color = "status-processing"
+            status_text = f"⏳ {status.upper()}"
+
+        st.markdown(
+            f'<p style="font-size: 18px;"><span class="status-badge {status_color}">{status_text}</span></p>',
+            unsafe_allow_html=True,
+        )
+
+        # Progress bar
+        st.progress(min(progress / 100.0, 1.0))
+        st.write(f"**Progress:** {progress}% - {message}")
+
+        # Display status details
+        st.divider()
+
+        if status == "done":
+            st.success("✅ Processing completed successfully!")
+
+            # Display clips
+            clips = status_data.get("clips", [])
+            if clips:
+                st.subheader(f"Generated Clips ({len(clips)})")
+
+                for idx, clip in enumerate(clips, 1):
+                    with st.container(border=True):
+                        col1, col2, col3 = st.columns([3, 1, 1])
+
+                        with col1:
+                            title = clip.get("title", f"Clip {idx}")
+                            start_time = clip.get("start", 0)
+                            end_time = clip.get("end", 0)
+                            duration = end_time - start_time
+                            st.write(
+                                f"**{title}**  \n"
+                                f"⏱️ {start_time:.1f}s - {end_time:.1f}s ({duration:.1f}s)  \n"
+                                f"Score: {'⭐' * min(int(clip.get('score', 0) / 20), 5)}"
+                            )
+
+                        with col2:
+                            filename = clip.get("filename", "")
+                            if st.button(
+                                "📥 Download",
+                                key=f"clip_{idx}",
+                                use_container_width=True,
+                            ):
+                                video_data = download_clip(job_id, filename)
+                                if video_data:
+                                    st.download_button(
+                                        label="📥 Click to Download",
+                                        data=video_data,
+                                        file_name=filename,
+                                        mime="video/mp4",
+                                        key=f"download_{idx}",
+                                    )
+
+            # Display Shorts clips if available
+            shorts_clips = status_data.get("shorts_clips", [])
+            if shorts_clips:
+                st.subheader(f"YouTube Shorts ({len(shorts_clips)})")
+
+                cols = st.columns(2)
+                for idx, short in enumerate(shorts_clips):
+                    with cols[idx % 2]:
+                        with st.container(border=True):
+                            filename = short.get("filename", "")
+                            st.write(
+                                f"**Shorts {idx + 1}**  \n"
+                                f"Score: {'⭐' * min(int(short.get('score', 0) / 20), 5)}"
+                            )
+
+                            if st.button(
+                                "📥 Download",
+                                key=f"shorts_{idx}",
+                                use_container_width=True,
+                            ):
+                                video_data = download_clip(
+                                    job_id, filename, is_shorts=True
+                                )
+                                if video_data:
+                                    st.download_button(
+                                        label="📥 Click to Download",
+                                        data=video_data,
+                                        file_name=filename,
+                                        mime="video/mp4",
+                                        key=f"download_shorts_{idx}",
+                                    )
+
+            # Cleanup button
+            st.divider()
+            if st.button("🗑️ Clean Up & Start New Job", use_container_width=True):
+                cleanup_job(job_id)
+                st.session_state.job_id = None
+                st.rerun()
+
+        elif status in ["error", "failed"]:
+            st.error("❌ An error occurred during processing")
+            error_msg = status_data.get("error", "Unknown error")
+            st.code(error_msg, language="text")
+
+            if st.button("🔄 Try Again", use_container_width=True):
+                cleanup_job(job_id)
+                st.session_state.job_id = None
+                st.rerun()
+
+        else:
+            # Still processing
+            st.info(
+                "Processing is ongoing. The page will automatically refresh every 3 seconds."
+            )
+
+            # Auto-refresh every 3 seconds
+            import time
+            time.sleep(3)
+            st.rerun()
+
+    # Footer
+    st.divider()
+    st.markdown(
+        """
+        <div style="text-align: center; color: gray; font-size: 12px;">
+        <p>VideoClipper 🎬 - AI-powered video clip generator</p>
+        <p>Powered by Groq Whisper & Llama 3.3</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

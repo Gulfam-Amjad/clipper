@@ -15,12 +15,18 @@ from fastapi.responses import FileResponse, JSONResponse
 
 load_dotenv()
 
+from jobs import job_store
 from jobs.job_store import create_job, get_job, mark_done, mark_error, update_job
 from models.schemas import ClipInfo, JobStatus, ProcessResponse
-from services.analyzer import analyze_transcript
+from services.analyzer import analyze_transcript, score_clips
 from services.audio_extractor import extract_audio
-from services.clipper import cut_clips
+from services.clipper import cut_all_shorts, cut_clips
 from services.transcriber import transcribe_audio
+from services.youtube_downloader import (
+	download_youtube_video,
+	get_video_info,
+	validate_youtube_url,
+)
 from utils.file_manager import cleanup_job_folder, create_job_folder, get_job_path
 from utils.validators import validate_video_file
 
@@ -49,16 +55,24 @@ def ensure_temp_directory() -> None:
 	logger.info("Temp directory initialized")
 
 
-# Run the clip-processing pipeline for a single job in the background thread.
-def run_pipeline(job_id: str, video_path: str, guidance: str) -> None:
-	"""
-	Executes the end-to-end processing pipeline for a job.
+def _set_job_metadata(job_id: str, **fields: object) -> None:
+	"""Persist extra metadata fields directly in the in-memory job store."""
+	try:
+		with job_store._jobs_lock:
+			if job_id in job_store.jobs:
+				job_store.jobs[job_id].update(fields)
+	except Exception:
+		logger.exception("Failed to update job metadata for job %s", job_id)
 
-	The function is intentionally synchronous because FastAPI BackgroundTasks
-	executes regular callables in a worker thread.
-	"""
-	# Resolve the job folder path once so every pipeline step writes to the same location.
-	job_folder = get_job_path(job_id)
+
+def run_pipeline_from_video(
+	job_id: str,
+	video_path: str,
+	job_folder: str,
+	guidance: str,
+	generate_shorts: bool,
+) -> None:
+	"""Executes the shared processing pipeline for an already available local video file."""
 	logger.info("Pipeline started for job %s", job_id)
 
 	# Centralize failure handling so a job is marked failed and temporary files are removed.
@@ -71,9 +85,20 @@ def run_pipeline(job_id: str, video_path: str, guidance: str) -> None:
 			except Exception:
 				logger.exception("Cleanup failed for job %s after an error", job_id)
 
+	# If this flow started from /process-url, the download step already consumed Step 0.
+	job_snapshot = get_job(job_id) or {}
+	started_from_youtube = job_snapshot.get("status") == "downloading"
+	step_offset = 1 if started_from_youtube else 0
+	step_total = (6 if generate_shorts else 5) if started_from_youtube else (5 if generate_shorts else 4)
+
 	# Step A: extract audio from the uploaded video.
 	try:
-		update_job(job_id, "extracting_audio", "Extracting audio (Step 1 of 4)...", 10)
+		update_job(
+			job_id,
+			"extracting_audio",
+			f"Extracting audio (Step {1 + step_offset} of {step_total})...",
+			20,
+		)
 		audio_path = extract_audio(video_path, str(pathlib.Path(job_folder) / "audio.mp3"))
 	except Exception as exc:
 		logger.exception("Audio extraction failed for job %s", job_id)
@@ -82,7 +107,12 @@ def run_pipeline(job_id: str, video_path: str, guidance: str) -> None:
 
 	# Step B: transcribe the extracted audio into timestamped segments.
 	try:
-		update_job(job_id, "transcribing", "Transcribing audio (Step 2 of 4)...", 35)
+		update_job(
+			job_id,
+			"transcribing",
+			f"Transcribing audio (Step {2 + step_offset} of {step_total})...",
+			45,
+		)
 		segments = transcribe_audio(audio_path)
 	except Exception as exc:
 		logger.exception("Transcription failed for job %s", job_id)
@@ -91,8 +121,15 @@ def run_pipeline(job_id: str, video_path: str, guidance: str) -> None:
 
 	# Step C: analyze the transcript and turn it into clip timestamp recommendations.
 	try:
-		update_job(job_id, "analyzing", "Analyzing content (Step 3 of 4)...", 60)
-		clips = analyze_transcript(segments, guidance)
+		update_job(
+			job_id,
+			"analyzing",
+			f"Analyzing content (Step {3 + step_offset} of {step_total})...",
+			65,
+		)
+		clips, music_style = analyze_transcript(segments, guidance or None)
+		clips = score_clips(clips, segments)
+		_set_job_metadata(job_id, music_style=music_style)
 	except Exception as exc:
 		logger.exception("Transcript analysis failed for job %s", job_id)
 		fail_job(exc)
@@ -100,16 +137,100 @@ def run_pipeline(job_id: str, video_path: str, guidance: str) -> None:
 
 	# Step D: cut the original video into individual clip files.
 	try:
-		update_job(job_id, "cutting", "Cutting clips (Step 4 of 4)...", 80)
-		clip_results = cut_clips(video_path, clips, job_folder)
+		update_job(
+			job_id,
+			"cutting",
+			f"Cutting clips (Step {4 + step_offset} of {step_total})...",
+			85,
+		)
+		clip_results = cut_clips(
+			video_path,
+			clips,
+			job_folder,
+			all_segments=segments,
+			music_style=music_style,
+			is_shorts=False,
+		)
 	except Exception as exc:
 		logger.exception("Clip cutting failed for job %s", job_id)
 		fail_job(exc)
 		return
 
+	# Step E: generate YouTube Shorts versions (optional).
+	shorts_clips = []
+	if generate_shorts:
+		update_job(
+			job_id,
+			"creating_shorts",
+			f"Creating Shorts versions (Step {5 + step_offset} of {step_total})...",
+			92,
+		)
+		try:
+			shorts_clips = cut_all_shorts(
+				video_path,
+				clips,
+				job_folder,
+				all_segments=segments,
+				music_style=music_style,
+			)
+			logging.info(f"Job {job_id}: {len(shorts_clips)} shorts clips created")
+		except Exception as e:
+			# Shorts failure must NOT fail the whole job
+			# Normal clips are already done - just log and continue
+			logging.warning(f"Job {job_id}: Shorts generation failed: {e}")
+			shorts_clips = []
+
 	# Mark the job as done and store the generated clip metadata.
 	mark_done(job_id, clip_results)
+
+	# Add shorts and music style to the job entry.
+	_set_job_metadata(job_id, shorts_clips=shorts_clips, music_style=music_style)
+
 	logger.info("Pipeline complete for job %s", job_id)
+
+
+# Run the clip-processing pipeline for an uploaded file in the background thread.
+def run_pipeline(job_id: str, video_path: str, guidance: str, generate_shorts: bool = False) -> None:
+	"""
+	Wrapper for uploaded-file jobs that delegates into the shared video pipeline.
+
+	The function is intentionally synchronous because FastAPI BackgroundTasks
+	executes regular callables in a worker thread.
+	
+	Args:
+		job_id: Unique job identifier
+		video_path: Path to the uploaded video file
+		guidance: Optional user guidance text for clip analysis
+		generate_shorts: If True, also generate YouTube Shorts (9:16) versions of clips
+	"""
+	job_folder = get_job_path(job_id)
+	run_pipeline_from_video(job_id, video_path, job_folder, guidance, generate_shorts)
+
+
+def run_youtube_pipeline(
+	job_id: str,
+	youtube_url: str,
+	job_folder: str,
+	guidance: str,
+	generate_shorts: bool,
+) -> None:
+	"""Background task that downloads a YouTube video, then runs the shared pipeline."""
+	total_steps = 6 if generate_shorts else 5
+	try:
+		update_job(
+			job_id,
+			"downloading",
+			f"Downloading YouTube video (Step 0 of {total_steps})...",
+			5,
+		)
+		video_path = download_youtube_video(youtube_url, job_folder)
+		logging.info(f"Job {job_id}: Downloaded to {video_path}")
+	except Exception as e:
+		mark_error(job_id, f"Download failed: {str(e)}")
+		return
+
+	# Steps 1-5: shared pipeline from local video path.
+	run_pipeline_from_video(job_id, video_path, job_folder, guidance, generate_shorts)
 
 
 # Accept a video upload, validate it, persist it to the job folder, and queue background work.
@@ -118,6 +239,7 @@ async def process_video(
 	background_tasks: BackgroundTasks,
 	video: UploadFile = File(...),
 	guidance: str = Form(default="", max_length=500),
+	shorts_mode: str = Form(default="false"),
 ) -> ProcessResponse:
 	"""Receives an uploaded video and starts the processing pipeline."""
 	logger.info("Received POST /process request for filename=%s", video.filename)
@@ -137,6 +259,9 @@ async def process_video(
 		if len(clean_guidance) > 500:
 			clean_guidance = clean_guidance[:500]
 
+		# Convert shorts_mode string to boolean
+		generate_shorts = shorts_mode.lower() == "true"
+
 		# Create a new job and its working directory for the uploaded file.
 		job_id = str(uuid.uuid4())
 		create_job(job_id)
@@ -151,7 +276,7 @@ async def process_video(
 			output_file.write(file_content)
 
 		# Queue the background pipeline after the upload has been persisted.
-		background_tasks.add_task(run_pipeline, job_id, str(video_path), clean_guidance)
+		background_tasks.add_task(run_pipeline, job_id, str(video_path), clean_guidance, generate_shorts)
 
 		# Return the job identifier so the client can poll status.
 		return ProcessResponse(job_id=job_id, message="Processing started")
@@ -160,6 +285,43 @@ async def process_video(
 		raise
 	except Exception as exc:
 		logger.exception("Failed to start processing job")
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/process-url", response_model=ProcessResponse)
+async def process_url(
+	background_tasks: BackgroundTasks,
+	youtube_url: str = Form(...),
+	guidance: str = Form(default=""),
+	shorts_mode: str = Form(default="false"),
+) -> ProcessResponse:
+	"""Validates a YouTube URL, creates a job, and starts background download + processing."""
+	logger.info("Received POST /process-url request")
+
+	try:
+		valid, error_msg = validate_youtube_url(youtube_url)
+		if not valid:
+			raise HTTPException(400, f"Invalid YouTube URL: {error_msg}")
+
+		clean_guidance = (guidance or "").strip()
+		if len(clean_guidance) > 500:
+			clean_guidance = clean_guidance[:500]
+
+		job_id = str(uuid.uuid4())
+		create_job(job_id)
+		job_folder = create_job_folder(job_id)
+
+		generate_shorts = shorts_mode.lower() == "true"
+
+		background_tasks.add_task(
+			run_youtube_pipeline, job_id, youtube_url, job_folder, clean_guidance, generate_shorts
+		)
+
+		return ProcessResponse(job_id=job_id, message="YouTube video download started")
+	except HTTPException:
+		raise
+	except Exception as exc:
+		logger.exception("Failed to start YouTube processing job")
 		raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -175,13 +337,32 @@ def get_status(job_id: str) -> JobStatus:
 		if job is None:
 			raise HTTPException(status_code=404, detail="Job not found")
 
-		return JobStatus(**job)
+		# Include shorts_clips in response if they exist
+		job_data = dict(job)
+		if "shorts_clips" not in job_data:
+			job_data["shorts_clips"] = []
+		job_data["music_style"] = job_data.get("music_style", "lofi")
+
+		return JobStatus(**job_data)
 
 	except HTTPException:
 		raise
 	except Exception as exc:
 		logger.exception("Failed to fetch status for job %s", job_id)
 		raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/video-info")
+async def video_info(url: str):
+	"""Returns metadata for a YouTube URL without downloading the video."""
+	valid, err = validate_youtube_url(url)
+	if not valid:
+		raise HTTPException(400, err)
+	try:
+		info = get_video_info(url)
+		return info
+	except Exception as e:
+		raise HTTPException(500, str(e))
 
 
 # Serve a finished clip file from the job's temp directory.
@@ -221,6 +402,54 @@ def download_clip(job_id: str, filename: str) -> FileResponse:
 		raise
 	except Exception as exc:
 		logger.exception("Failed to download clip for job %s", job_id)
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# Serve a finished Shorts file from the job's temp directory.
+@app.get("/download-shorts/{job_id}/{filename}")
+def download_shorts(job_id: str, filename: str) -> FileResponse:
+	"""Downloads a generated Shorts clip if the job has finished successfully."""
+	logger.info("Received GET /download-shorts/%s/%s request", job_id, filename)
+
+	try:
+		# Ensure the job exists and has completed before serving any files.
+		job = get_job(job_id)
+		if job is None or job.get("status") != "done":
+			raise HTTPException(status_code=404, detail="Shorts clip not available")
+
+		# Only allow filenames that start with "shorts_" (security check).
+		if not filename.startswith("shorts_"):
+			raise HTTPException(status_code=400, detail="Invalid filename")
+
+		# Only allow .mp4 filenames.
+		if not filename.endswith(".mp4"):
+			raise HTTPException(status_code=400, detail="Invalid file format")
+
+		# Only allow filenames that were actually produced for this job.
+		job_shorts = job.get("shorts_clips") or []
+		allowed_filenames = {
+			short.get("filename")
+			for short in job_shorts
+			if isinstance(short, dict) and short.get("filename")
+		}
+		if filename not in allowed_filenames:
+			raise HTTPException(status_code=404, detail="File not found")
+
+		# Build the expected file path inside the job folder.
+		job_path = pathlib.Path("temp") / f"job_{job_id}"
+		file_path = job_path / filename
+		if not file_path.resolve().is_relative_to(job_path.resolve()):
+			raise HTTPException(status_code=400, detail="Invalid filename")
+		if not file_path.exists():
+			raise HTTPException(status_code=404, detail="File not found")
+
+		# Return the file as an MP4 download.
+		return FileResponse(str(file_path), media_type="video/mp4", filename=filename)
+
+	except HTTPException:
+		raise
+	except Exception as exc:
+		logger.exception("Failed to download shorts clip for job %s", job_id)
 		raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

@@ -38,10 +38,12 @@ class ClipInfo(BaseModel):
 
 class JobStatus(BaseModel):
     """Status and progress information for a video processing job."""
-    status: Literal["queued", "extracting_audio", "transcribing", "analyzing", "cutting", "done", "error"]
+    status: Literal["queued", "downloading", "extracting_audio", "transcribing", "analyzing", "cutting", "creating_shorts", "done", "error"]
     current_step: str
     progress: int
     clips: Optional[list[ClipInfo]] = None
+    shorts_clips: Optional[list[ClipInfo]] = None
+    music_style: Optional[str] = "lofi"
     error: Optional[str] = None
     
     @field_validator("progress")

@@ -44,6 +44,7 @@ def extract_audio(video_path: str, output_path: str) -> str:
         # -acodec mp3 = encode as MP3 codec
         # -ar 16000  = 16kHz sample rate (Whisper API requirement)
         # -ac 1      = mono channel (reduces file size, Whisper handles mono)
+        # -b:a 32k   = 32kbps bitrate (sufficient for speech, ~4x file size reduction)
         ffmpeg_command = [
             "ffmpeg",
             "-y",
@@ -56,6 +57,8 @@ def extract_audio(video_path: str, output_path: str) -> str:
             "16000",
             "-ac",
             "1",
+            "-b:a",
+            "32k",
             output_path,
         ]
         

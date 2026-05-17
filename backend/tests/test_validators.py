@@ -250,5 +250,26 @@ class TestLLMResponseParsing:
             parse_llm_response(response)
 
 
+class TestAnalyzedClipRepair:
+    """Tests for repairing analyzer output before validation."""
+
+    def test_repair_zero_length_clip(self):
+        """Test that a zero-length clip is expanded into a valid window."""
+        from services.analyzer import _repair_analyzed_clips
+
+        segments = [
+            {"start": 0.0, "end": 20.0, "text": "Intro"},
+            {"start": 20.0, "end": 45.0, "text": "Main idea"},
+            {"start": 45.0, "end": 80.0, "text": "Details"},
+        ]
+        clips = [{"start": 0.0, "end": 0.0, "label": "Intro"}]
+
+        result = _repair_analyzed_clips(clips, segments)
+
+        assert len(result) == 1
+        assert result[0]["start"] == 0.0
+        assert result[0]["end"] == 30.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
