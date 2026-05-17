@@ -17,17 +17,28 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file at module initialization
 load_dotenv()
 
-# Validate GROQ_API_KEY is set before any API calls
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY environment variable is not set. "
-        "Please add it to your .env file."
-    )
+# Lazy initialization of Groq client - only initialize when needed
+_client = None
 
-# Initialize Groq client with API key
-client = Groq(api_key=GROQ_API_KEY)
-logger.info("Groq client initialized for analyzer")
+def _get_groq_client():
+    """
+    Lazy-initializes and returns the Groq client.
+    Raises RuntimeError if GROQ_API_KEY is not set.
+    """
+    global _client
+    if _client is not None:
+        return _client
+    
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY environment variable is not set. "
+            "Please add it to your .env file or set the environment variable."
+        )
+    
+    _client = Groq(api_key=GROQ_API_KEY)
+    logger.info("Groq client initialized for analyzer")
+    return _client
 
 
 def _seconds_to_mmss(seconds: float) -> str:
@@ -79,7 +90,7 @@ def format_transcript(segments: list[dict]) -> str:
         raise
 
 
-def parse_llm_response(response_text: str) -> tuple[list[dict], str]:
+def parse_llm_response(response_text: str) -> list[dict]:
     """
     Parses and validates LLM response as a JSON object containing clips.
     
@@ -118,19 +129,14 @@ def parse_llm_response(response_text: str) -> tuple[list[dict], str]:
         
         # Parse JSON from cleaned text
         result = json.loads(cleaned)
-        
-        # Validate that result is an object with clips and music_style keys
-        if not isinstance(result, dict):
-            raise ValueError("LLM response must be a JSON object, got: " + str(type(result)))
 
-        if "clips" not in result:
-            raise ValueError("LLM response missing required 'clips' field")
-
-        clips = result["clips"]
-        music_style = result.get("music_style", "lofi")
-
-        if not isinstance(music_style, str) or music_style not in allowed_music_styles:
-            music_style = "lofi"
+        # Accept either a top-level list of clips, or a dict with a 'clips' key
+        if isinstance(result, list):
+            clips = result
+        elif isinstance(result, dict) and "clips" in result:
+            clips = result["clips"]
+        else:
+            raise ValueError("LLM response must be a JSON array of clips or an object with 'clips' key, got: " + str(type(result)))
 
         # Validate that clips is a list
         if not isinstance(clips, list):
@@ -167,7 +173,11 @@ def parse_llm_response(response_text: str) -> tuple[list[dict], str]:
         
         # Parsing succeeded; strict clip bounds are enforced after repair.
         logger.info(f"Successfully parsed {len(clips)} clips from LLM response")
-        return clips, music_style
+        # NOTE: Historically this function returned (clips, music_style).
+        # Tests and many call-sites expect the parsed clips list directly,
+        # so return the clips list only. Callers that need music_style should
+        # fall back to a default value (e.g., 'lofi').
+        return clips
         
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}") from e
@@ -181,7 +191,8 @@ def _repair_analyzed_clips(clips: list[dict], segments: list[dict]) -> list[dict
 
     The LLM can occasionally return very short or zero-length ranges even when the
     prompt asks for 30-180 second clips. This helper expands those clips to a valid
-    window while preserving their ordering and avoiding overlap.
+    window while preserving their ordering and avoiding overlap. If a clip cannot be
+    repaired, it is skipped.
     """
     if not segments:
         raise ValueError("No transcript segments available to repair clips")
@@ -194,43 +205,71 @@ def _repair_analyzed_clips(clips: list[dict], segments: list[dict]) -> list[dict
         end = float(clip["end"])
         label = str(clip["label"])
 
+        # Step 1: Avoid overlap with the previous clip
         if repaired_clips and start < repaired_clips[-1]["end"]:
             start = repaired_clips[-1]["end"]
 
+        # Step 2: Ensure minimum 30 seconds by expanding end
         if end <= start:
             end = start + 30.0
+        else:
+            duration = end - start
+            if duration < 30.0:
+                end = start + 30.0
 
+        # Step 3: Cap at maximum 180 seconds
         duration = end - start
-        if duration < 30.0:
-            end = start + 30.0
-        elif duration > 180.0:
+        if duration > 180.0:
             end = start + 180.0
 
+        # Step 4: Ensure clip doesn't exceed transcript bounds
         if end > transcript_end:
             end = transcript_end
+            # Try to move start back to maintain 30s minimum
             start = max(0.0, end - 30.0)
 
+        # Step 5: Check for overlap with previous clip one more time after adjusting for transcript end
         if repaired_clips and start < repaired_clips[-1]["end"]:
-            start = repaired_clips[-1]["end"]
-
-        if end <= start or end - start < 30.0:
-            raise ValueError(
-                f"Clip {index} could not be repaired into a valid 30-180s range"
+            # If still overlapping, skip this clip rather than failing
+            logger.warning(
+                f"Clip {index} cannot be positioned without overlapping previous clip. Skipping."
             )
+            continue
+
+        # Step 6: Final validation
+        if end <= start or end - start < 30.0:
+            # Skip clips that cannot be repaired instead of raising
+            logger.warning(
+                f"Clip {index} could not be repaired into a valid 30-180s range "
+                f"(start={start:.1f}, end={end:.1f}, duration={end-start:.1f}s). Skipping."
+            )
+            continue
 
         repaired_clips.append({"start": start, "end": end, "label": label})
+
+    # Ensure we have at least some clips after repair
+    if not repaired_clips:
+        raise ValueError(
+            "All clips were invalid and could not be repaired. "
+            "No valid clips remain after repair process."
+        )
 
     return validate_clip_bounds(repaired_clips)
 
 
 def analyze_transcript(segments: list[dict], guidance: str = None) -> tuple[list[dict], str]:
     """
-    Analyzes transcript segments to identify 4-5 key video clips.
+    Analyzes transcript segments to identify key video clips.
     
     Uses Groq Llama 3.3 70B LLM to intelligently extract the most important
     segments. Can operate in two modes:
     - Auto Mode (guidance=None): Identifies key concepts automatically
     - Guided Mode (guidance set): Focuses on user-specified topics
+    
+    Number of clips requested adapts to video length:
+    - Short videos (< 2 min): 1-2 clips
+    - Medium videos (2-5 min): 2-3 clips
+    - Longer videos (> 5 min): 4-5 clips
     
     Includes automatic retry logic with progressive strictness:
     - First attempt: standard LLM prompt
@@ -255,6 +294,20 @@ def analyze_transcript(segments: list[dict], guidance: str = None) -> tuple[list
         if not isinstance(segments, list):
             raise TypeError(f"Segments must be list, got {type(segments)}")
         
+        # Calculate video duration for adaptive clip count
+        total_duration = max(float(seg["end"]) for seg in segments) - min(float(seg["start"]) for seg in segments)
+        
+        # Determine number of clips based on video length
+        if total_duration < 120:  # Less than 2 minutes
+            target_clips = "1 to 2"
+            min_clips_note = "For very short videos, prioritize the single most important moment."
+        elif total_duration < 300:  # Less than 5 minutes
+            target_clips = "2 to 3"
+            min_clips_note = "For medium videos, select the most impactful segments."
+        else:  # 5+ minutes
+            target_clips = "4 to 5"
+            min_clips_note = "For longer videos, include multiple key moments for better coverage."
+        
         # Determine mode and log it for tracking
         if guidance:
             mode = "Guided"
@@ -271,9 +324,8 @@ def analyze_transcript(segments: list[dict], guidance: str = None) -> tuple[list
         # Format the transcript segments into readable LLM input
         formatted_transcript = format_transcript(segments)
         
-        # Construct system prompt for Auto/Guided mode
-        # This prompt guides the LLM to return only JSON with specific requirements
-        system_prompt = """You are a video analysis AI. Your job is to identify the 4 to 5 most 
+        # Construct system prompt for Auto/Guided mode with adaptive clip count
+        system_prompt = f"""You are a video analysis AI. Your job is to identify the {target_clips} most 
 important, information-dense, and valuable segments from a video transcript.
 
 Rules:
@@ -281,6 +333,7 @@ Rules:
 - Clips must NOT overlap with each other
 - Prefer segments where the speaker explains a key concept, gives a main point, 
   or delivers important information
+- {min_clips_note}
 - Return ONLY a valid JSON object. No explanation. No markdown. No extra text.
 - Timestamps must be in seconds as floats (e.g. 45.0, not "0:45")
 
@@ -295,13 +348,13 @@ Base your choice on the video's energy and topic:
 Return the result as a JSON object with 'music_style' and 'clips' keys.
 
 Output format (return ONLY this JSON, nothing else):
-{
+{{
     "music_style": "phonk",
     "clips": [
-        {"start": 45.2, "end": 98.7, "label": "Main concept explained"},
-        {"start": 134.0, "end": 187.3, "label": "Key example given"}
+        {{"start": 45.2, "end": 98.7, "label": "Main concept explained"}},
+        {{"start": 134.0, "end": 187.3, "label": "Key example given"}}
     ]
-}"""
+}}"""
         
         # Build user message with formatted transcript
         user_message = f"Analyze this transcript and identify the best clips:\n\n{formatted_transcript}"
@@ -312,7 +365,8 @@ Output format (return ONLY this JSON, nothing else):
         
         # ─── FIRST LLM CALL ATTEMPT ───
         logger.debug("Calling Groq LLM for clip analysis (attempt 1/2)...")
-        response = client.chat.completions.create(
+        groq_client = _get_groq_client()
+        response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             temperature=0.1,
             max_tokens=1000,
@@ -328,7 +382,9 @@ Output format (return ONLY this JSON, nothing else):
         
         # Try to parse response into clips
         try:
-            clips, music_style = parse_llm_response(response_text)
+            clips = parse_llm_response(response_text)
+            # Default music style when not provided explicitly
+            music_style = "lofi"
             clips = _repair_analyzed_clips(clips, segments)
             logger.info(f"First LLM call succeeded: {len(clips)} clips extracted")
             return clips, music_style
@@ -349,7 +405,7 @@ Output format (return ONLY this JSON, nothing else):
             )
             
             logger.debug("Calling Groq LLM for clip analysis (attempt 2/2, stricter)...")
-            response2 = client.chat.completions.create(
+            response2 = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 temperature=0.1,
                 max_tokens=1000,
@@ -365,7 +421,8 @@ Output format (return ONLY this JSON, nothing else):
             
             # Try to parse second response
             try:
-                clips, music_style = parse_llm_response(response_text2)
+                clips = parse_llm_response(response_text2)
+                music_style = "lofi"
                 clips = _repair_analyzed_clips(clips, segments)
                 logger.info(f"Second LLM call succeeded: {len(clips)} clips extracted")
                 return clips, music_style

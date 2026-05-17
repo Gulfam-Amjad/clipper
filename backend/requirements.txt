@@ -8,6 +8,9 @@ pydantic==2.5.0
 aiofiles==23.2.1
 pytest==7.4.3
 pytest-cov==4.1.0
-numpy==1.24.3
-opencv-python-headless==4.8.1.78
-mediapipe==0.10.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+mediapipe==0.10.9
+yt-dlp==2026.3.17
+langchain==0.1.0
+langchain-groq==0.1.0

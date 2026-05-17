@@ -98,7 +98,10 @@ def upload_video(video_file, guidance, generate_shorts):
             st.success("✅ Video processing started!")
             return result["job_id"]
         else:
-            error_detail = response.json().get("detail", "Unknown error")
+            try:
+                error_detail = response.json().get("detail", "Unknown error")
+            except:
+                error_detail = response.text or f"HTTP {response.status_code}"
             st.error(f"❌ Failed to process video: {error_detail}")
             return None
 
@@ -131,7 +134,10 @@ def process_youtube_url(youtube_url, guidance, generate_shorts):
             st.success("✅ YouTube video processing started!")
             return result["job_id"]
         else:
-            error_detail = response.json().get("detail", "Unknown error")
+            try:
+                error_detail = response.json().get("detail", "Unknown error")
+            except:
+                error_detail = response.text or f"HTTP {response.status_code}"
             st.error(f"❌ Failed to process YouTube URL: {error_detail}")
             return None
 
