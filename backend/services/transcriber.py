@@ -6,25 +6,46 @@ Transcribes audio using Groq Whisper API.
 import logging
 import os
 
-from dotenv import load_dotenv
-from groq import Groq
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
+
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ru": "Russian",
+    "tr": "Turkish",
+    "ur": "Urdu",
+}
 
 # Load environment variables from .env file at module initialization
 load_dotenv()
 
-# Validate GROQ_API_KEY is set before any API calls
+# Read the API key at import time, but defer validation until transcription.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY environment variable is not set. "
-        "Please add it to your .env file."
-    )
 
-# Initialize Groq client with API key
-client = Groq(api_key=GROQ_API_KEY)
-logger.info("Groq client initialized successfully")
+# Initialize Groq client with API key when the SDK is available.
+client = Groq(api_key=GROQ_API_KEY) if Groq is not None and GROQ_API_KEY else None
+if client is not None:
+    logger.info("Groq client initialized successfully")
 
 
 def _segment_value(segment, key: str):
@@ -34,7 +55,12 @@ def _segment_value(segment, key: str):
     return getattr(segment, key)
 
 
-def transcribe_audio(audio_path: str) -> list[dict]:
+def get_supported_languages() -> dict:
+    """Return the supported transcription language codes."""
+    return SUPPORTED_LANGUAGES
+
+
+def transcribe_audio(audio_path: str, language: str = "en") -> list[dict]:
     """
     Transcribes an audio file using Groq Whisper API.
     
@@ -64,17 +90,25 @@ def transcribe_audio(audio_path: str) -> list[dict]:
         
         # Open the audio file in binary mode and send to Groq Whisper API
         with open(audio_path, "rb") as audio_file:
+            if client is None:
+                if not GROQ_API_KEY:
+                    raise RuntimeError(
+                        "GROQ_API_KEY environment variable is not set. "
+                        "Please add it to your .env file."
+                    )
+                raise RuntimeError("Groq SDK is not available in this environment")
+
             # Call Groq Whisper API with specific parameters optimized for accuracy
             # - model: "whisper-large-v3" (latest and most accurate Whisper model)
             # - response_format: "verbose_json" (returns detailed segment info with timestamps)
-            # - language: "en" (English language transcription)
+            # - language: language parameter (defaults to English)
             logger.debug("Sending audio to Groq Whisper API...")
             
             response = client.audio.transcriptions.create(
                 model="whisper-large-v3",
                 file=audio_file,
                 response_format="verbose_json",
-                language="en"
+                language=language,
             )
         
         # Validate that API returned segments in response

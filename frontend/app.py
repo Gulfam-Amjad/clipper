@@ -76,13 +76,14 @@ def check_backend_health():
         return False
 
 
-def upload_video(video_file, guidance, generate_shorts):
+def upload_video(video_file, guidance, generate_shorts, language: str = "en"):
     """Upload and process a video file"""
     try:
         files = {"video": video_file}
         data = {
             "guidance": guidance,
             "shorts_mode": "true" if generate_shorts else "false",
+            "language": language,
         }
 
         response = requests.post(
@@ -113,13 +114,14 @@ def upload_video(video_file, guidance, generate_shorts):
         return None
 
 
-def process_youtube_url(youtube_url, guidance, generate_shorts):
+def process_youtube_url(youtube_url, guidance, generate_shorts, language: str = "en"):
     """Process a YouTube video"""
     try:
         data = {
             "youtube_url": youtube_url,
             "guidance": guidance,
             "shorts_mode": "true" if generate_shorts else "false",
+            "language": language,
         }
 
         response = requests.post(
@@ -251,6 +253,20 @@ def main():
             help="Also create vertical format clips suitable for YouTube Shorts",
         )
 
+        # Language selector (fetch from backend with graceful fallback)
+        try:
+            lang_response = requests.get(f"{BACKEND_URL}/languages", timeout=5)
+            languages = lang_response.json() if lang_response.status_code == 200 else {"en": "English"}
+        except Exception:
+            languages = {"en": "English", "ur": "Urdu", "ar": "Arabic"}
+
+        language = st.selectbox(
+            "Video Language",
+            options=list(languages.keys()),
+            format_func=lambda x: languages.get(x, x),
+            index=0,
+        )
+
     # Main content area
     if st.session_state.job_id is None:
         # Initial upload interface
@@ -275,7 +291,7 @@ def main():
                     if video_file is not None:
                         with st.spinner("Uploading video..."):
                             job_id = upload_video(
-                                video_file, guidance, generate_shorts
+                                video_file, guidance, generate_shorts, language
                             )
                             if job_id:
                                 st.rerun()
@@ -305,7 +321,7 @@ def main():
                     if youtube_url:
                         with st.spinner("Validating YouTube URL..."):
                             job_id = process_youtube_url(
-                                youtube_url, guidance, generate_shorts
+                                youtube_url, guidance, generate_shorts, language
                             )
                             if job_id:
                                 st.rerun()
@@ -411,6 +427,26 @@ def main():
                                 f"Score: {'⭐' * min(int(clip.get('score', 0) / 20), 5)}"
                             )
 
+                            # Viral score display
+                            viral_score = clip.get("combined_viral_score", 0)
+                            if viral_score:
+                                viral_color = "🔥" if viral_score >= 70 else "📈" if viral_score >= 40 else "📉"
+                                st.caption(f"Viral Potential: {viral_color} {viral_score}/100")
+
+                                # Platform fit breakdown
+                                llm_data = clip.get("viral_llm", {}) or {}
+                                platform_fit = llm_data.get("platform_fit", {}) or {}
+                                if platform_fit:
+                                    pcols = st.columns(3)
+                                    pcols[0].metric("YouTube", f"{platform_fit.get('youtube_shorts',0)}%")
+                                    pcols[1].metric("TikTok", f"{platform_fit.get('tiktok',0)}%")
+                                    pcols[2].metric("Instagram", f"{platform_fit.get('instagram',0)}%")
+
+                                # Improvement suggestion
+                                improvement = llm_data.get("improvement", "")
+                                if improvement:
+                                    st.caption(f"💡 {improvement}")
+
                         with col2:
                             filename = clip.get("filename", "")
                             if st.button(
@@ -427,6 +463,39 @@ def main():
                                         mime="video/mp4",
                                         key=f"download_{idx}",
                                     )
+
+                        with col3:
+                            # Preview button toggles an in-page preview
+                            if st.button("👁 Preview", key=f"preview_btn_{idx}", use_container_width=True):
+                                st.session_state[f"show_preview_{idx}"] = not st.session_state.get(f"show_preview_{idx}", False)
+
+                            if st.session_state.get(f"show_preview_{idx}", False):
+                                with st.spinner("Loading preview..."):
+                                    try:
+                                        r = requests.get(
+                                            f"{BACKEND_URL}/download/{job_id}/{filename}",
+                                            timeout=60,
+                                        )
+                                        if r.status_code == 200:
+                                            st.video(r.content)
+                                        else:
+                                            st.warning("Preview unavailable")
+                                    except requests.exceptions.RequestException:
+                                        st.warning("Could not load preview")
+
+                        # YouTube metadata expander
+                        with st.expander("📋 YouTube Metadata", expanded=False):
+                            if clip.get("title"):
+                                st.markdown(f"**Title:** {clip['title']}")
+                            if clip.get("description"):
+                                st.markdown(f"**Description:** {clip['description']}")
+                            if clip.get("hook"):
+                                st.markdown(f"**Hook:** *{clip['hook']}*")
+                            if clip.get("hashtags"):
+                                tags = " ".join([f"#{t}" for t in clip["hashtags"]])
+                                st.markdown(f"**Hashtags:** {tags}")
+                                if st.button("📋 Copy Hashtags", key=f"copy_tags_{idx}"):
+                                    st.session_state.update({"copied": tags})
 
             # Display Shorts clips if available
             shorts_clips = status_data.get("shorts_clips", [])
@@ -466,6 +535,20 @@ def main():
                 cleanup_job(job_id)
                 st.session_state.job_id = None
                 st.rerun()
+
+            # Chapters display (from status)
+            chapters = status_data.get("chapters", [])
+            youtube_chapters = status_data.get("youtube_chapters", "")
+            if chapters or youtube_chapters:
+                st.divider()
+                st.subheader("Detected Chapters")
+                if chapters:
+                    for ch in chapters:
+                        ts = ch.get("timestamp_str") or f"{ch.get('start',0)}"
+                        st.write(f"- {ts} {ch.get('title','Chapter')}")
+
+                if youtube_chapters:
+                    st.text_area("YouTube Chapters (copy-ready)", value=youtube_chapters, height=200)
 
         elif status in ["error", "failed"]:
             st.error("❌ An error occurred during processing")

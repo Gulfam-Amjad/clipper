@@ -6,6 +6,7 @@ This module wires together upload handling, the background pipeline, and job API
 import logging
 import pathlib
 import uuid
+import os
 
 import uvicorn
 from dotenv import load_dotenv
@@ -55,6 +56,31 @@ def ensure_temp_directory() -> None:
 	logger.info("Temp directory initialized")
 
 
+@app.on_event("startup")
+async def startup_event():
+	"""Start application-level services such as the cleanup scheduler."""
+	try:
+		os.makedirs("temp", exist_ok=True)
+		from services.cleanup_scheduler import start_cleanup_scheduler, stop_cleanup_scheduler
+
+		app.state.scheduler = start_cleanup_scheduler()
+		logging.info("Application started")
+	except Exception:
+		logger.exception("Failed to start application services on startup")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+	"""Stop background services cleanly on application shutdown."""
+	try:
+		if hasattr(app.state, "scheduler"):
+			from services.cleanup_scheduler import stop_cleanup_scheduler
+
+			stop_cleanup_scheduler(app.state.scheduler)
+	except Exception:
+		logger.exception("Error stopping application services on shutdown")
+
+
 def _set_job_metadata(job_id: str, **fields: object) -> None:
 	"""Persist extra metadata fields directly in the in-memory job store."""
 	try:
@@ -71,6 +97,7 @@ def run_pipeline_from_video(
 	job_folder: str,
 	guidance: str,
 	generate_shorts: bool,
+	language: str = "en",
 ) -> None:
 	"""Executes the shared processing pipeline for an already available local video file."""
 	logger.info("Pipeline started for job %s", job_id)
@@ -113,7 +140,7 @@ def run_pipeline_from_video(
 			f"Transcribing audio (Step {2 + step_offset} of {step_total})...",
 			45,
 		)
-		segments = transcribe_audio(audio_path)
+		segments = transcribe_audio(audio_path, language=language)
 	except Exception as exc:
 		logger.exception("Transcription failed for job %s", job_id)
 		fail_job(exc)
@@ -183,6 +210,42 @@ def run_pipeline_from_video(
 	# Mark the job as done and store the generated clip metadata.
 	mark_done(job_id, clip_results)
 
+	# Step F — Generate titles and metadata
+	try:
+		from services.title_generator import generate_all_metadata
+		clip_results = generate_all_metadata(clip_results, segments)
+		job = get_job(job_id)
+		if job:
+			job["clips"] = clip_results
+		logging.info(f"Job {job_id}: Metadata generation complete")
+	except Exception as e:
+		logging.warning(f"Job {job_id}: Metadata generation failed (non-critical): {e}")
+
+	# Step G — Viral scoring
+	try:
+		from services.viral_scorer import score_all_clips
+		clip_results = score_all_clips(clip_results, segments, use_llm=True)
+		job = get_job(job_id)
+		if job:
+			job["clips"] = clip_results
+		logging.info(f"Job {job_id}: Viral scoring complete")
+	except Exception as e:
+		logging.warning(f"Job {job_id}: Viral scoring failed (non-critical): {e}")
+
+	# Step H — Chapter detection
+	try:
+		from services.chapter_detector import detect_chapters, format_chapters_for_youtube
+		video_duration = segments[-1]["end"] if segments else 0
+		chapters = detect_chapters(segments, video_duration)
+		youtube_chapters = format_chapters_for_youtube(chapters)
+		job = get_job(job_id)
+		if job:
+			job["chapters"] = chapters
+			job["youtube_chapters"] = youtube_chapters
+		logging.info(f"Job {job_id}: Chapter detection complete — {len(chapters)} chapters")
+	except Exception as e:
+		logging.warning(f"Job {job_id}: Chapter detection failed (non-critical): {e}")
+
 	# Add shorts and music style to the job entry.
 	_set_job_metadata(job_id, shorts_clips=shorts_clips, music_style=music_style)
 
@@ -190,7 +253,7 @@ def run_pipeline_from_video(
 
 
 # Run the clip-processing pipeline for an uploaded file in the background thread.
-def run_pipeline(job_id: str, video_path: str, guidance: str, generate_shorts: bool = False) -> None:
+def run_pipeline(job_id: str, video_path: str, guidance: str, generate_shorts: bool = False, language: str = "en") -> None:
 	"""
 	Wrapper for uploaded-file jobs that delegates into the shared video pipeline.
 
@@ -204,7 +267,7 @@ def run_pipeline(job_id: str, video_path: str, guidance: str, generate_shorts: b
 		generate_shorts: If True, also generate YouTube Shorts (9:16) versions of clips
 	"""
 	job_folder = get_job_path(job_id)
-	run_pipeline_from_video(job_id, video_path, job_folder, guidance, generate_shorts)
+	run_pipeline_from_video(job_id, video_path, job_folder, guidance, generate_shorts, language=language)
 
 
 def run_youtube_pipeline(
@@ -240,6 +303,7 @@ async def process_video(
 	video: UploadFile = File(...),
 	guidance: str = Form(default="", max_length=500),
 	shorts_mode: str = Form(default="false"),
+	language: str = Form(default="en"),
 ) -> ProcessResponse:
 	"""Receives an uploaded video and starts the processing pipeline."""
 	logger.info("Received POST /process request for filename=%s", video.filename)
@@ -276,7 +340,7 @@ async def process_video(
 			output_file.write(file_content)
 
 		# Queue the background pipeline after the upload has been persisted.
-		background_tasks.add_task(run_pipeline, job_id, str(video_path), clean_guidance, generate_shorts)
+		background_tasks.add_task(run_pipeline, job_id, str(video_path), clean_guidance, generate_shorts, language)
 
 		# Return the job identifier so the client can poll status.
 		return ProcessResponse(job_id=job_id, message="Processing started")
@@ -343,6 +407,12 @@ def get_status(job_id: str) -> JobStatus:
 			job_data["shorts_clips"] = []
 		job_data["music_style"] = job_data.get("music_style", "lofi")
 
+		# Include chapters and YouTube-formatted chapters if present
+		if "chapters" not in job_data:
+			job_data["chapters"] = []
+		if "youtube_chapters" not in job_data:
+			job_data["youtube_chapters"] = ""
+
 		return JobStatus(**job_data)
 
 	except HTTPException:
@@ -363,6 +433,18 @@ async def video_info(url: str):
 		return info
 	except Exception as e:
 		raise HTTPException(500, str(e))
+
+
+	@app.get("/languages")
+	def get_languages():
+		"""Return supported transcription languages."""
+		try:
+			from services.transcriber import get_supported_languages
+
+			return get_supported_languages()
+		except Exception:
+			logger.exception("Failed to return supported languages")
+			raise HTTPException(status_code=500, detail="Failed to load supported languages")
 
 
 # Serve a finished clip file from the job's temp directory.
