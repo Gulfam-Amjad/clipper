@@ -214,4 +214,4 @@ def download_youtube_video(url: str, output_folder: str) -> str:
 
 # Test module on import
 if __name__ == "__main__":
-	print("youtube_downloader.py loaded OK")
+	logger.info("youtube_downloader.py loaded OK")

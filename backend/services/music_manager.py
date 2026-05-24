@@ -10,12 +10,14 @@ import subprocess
 from pathlib import Path
 import random
 
+from ..config import config
+
 
 logger = logging.getLogger(__name__)
 
 
-# Music directory and available tracks
-MUSIC_DIR = Path(__file__).parent.parent / "music"
+# Music directory and available tracks (configurable)
+MUSIC_DIR = Path(config.MUSIC_DIR)
 
 MUSIC_FILES = {
 	"phonk": MUSIC_DIR / "phonk.mp3",
@@ -252,4 +254,4 @@ def add_music_to_clip(
 
 # Test module on import
 if __name__ == "__main__":
-	print("music_manager.py loaded OK")
+	logger.info("music_manager.py loaded OK")

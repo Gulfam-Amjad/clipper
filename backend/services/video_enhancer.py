@@ -9,10 +9,15 @@ import os
 import subprocess
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 logger = logging.getLogger(__name__)
+
+try:
+	import cv2
+	import numpy as np
+except Exception:
+	cv2 = None
+	np = None
+	logger.warning("OpenCV or numpy not available; video enhancement features will be limited")
 
 
 def detect_face_center_x(video_path: str, clip_start: float, clip_end: float) -> float:
@@ -29,6 +34,11 @@ def detect_face_center_x(video_path: str, clip_start: float, clip_end: float) ->
 		Float between 0.0 (left) and 1.0 (right) representing average face X position.
 		Returns 0.5 (center) if no faces detected or on any error.
 	"""
+	# If OpenCV isn't available, return center as default (graceful fallback)
+	if cv2 is None:
+		logger.debug("cv2 not available; defaulting face center to 0.5")
+		return 0.5
+
 	try:
 		# Import mediapipe here to handle graceful fallback if unavailable
 		try:
@@ -104,7 +114,7 @@ def detect_face_center_x(video_path: str, clip_start: float, clip_end: float) ->
 		finally:
 			try:
 				detector.close()
-			except:
+			except Exception:
 				pass
 			cap.release()
 
@@ -371,4 +381,4 @@ def get_video_dimensions(video_path: str) -> tuple[int, int]:
 
 # Test module on import
 if __name__ == "__main__":
-	print("video_enhancer.py loaded OK")
+	logger.info("video_enhancer.py loaded OK")

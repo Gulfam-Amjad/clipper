@@ -414,4 +414,4 @@ def score_all_clips(clips: list[dict], segments: list[dict], use_llm: bool = Tru
 
 # Allow direct execution for a quick import sanity check.
 if __name__ == "__main__":
-    print("viral_scorer.py loaded OK")
+    logger.info("viral_scorer.py loaded OK")

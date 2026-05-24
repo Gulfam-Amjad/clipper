@@ -8,14 +8,15 @@ import logging
 import subprocess
 from pathlib import Path
 
-from services.music_manager import add_music_to_clip
-from services.subtitle_generator import segments_to_ass
-from services.video_enhancer import (
+from .music_manager import add_music_to_clip
+from .subtitle_generator import segments_to_ass
+from .video_enhancer import (
 	apply_enhancements,
 	detect_face_center_x,
 	get_video_dimensions,
 )
-from utils.validators import sanitize_label
+from ..config import config
+from ..utils.validators import sanitize_label
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ def cut_clips(
 	"""
 	if all_segments is None:
 		all_segments = []
+	filename_prefix = "shorts" if is_shorts else "clip"
 
 	# Prepare the output directory
 	output_directory = Path(output_folder)
@@ -142,7 +144,7 @@ def cut_clips(
 			duration = end - start
 			label = str(clip.get("label", "clip"))
 			sanitized_label = sanitize_label(label)
-			raw_filename = f"clip_{index}_{sanitized_label}_raw.mp4"
+			raw_filename = f"{filename_prefix}_{index}_{sanitized_label}_raw.mp4"
 			raw_clip_path = output_directory / raw_filename
 
 			# Stage 1 - Raw cut from source video
@@ -204,7 +206,7 @@ def cut_clips(
 			subtitle_path: str | None = None
 			has_subtitles = False
 			try:
-				subtitle_output = output_directory / f"clip_{index}_subs.ass"
+				subtitle_output = output_directory / f"{filename_prefix}_{index}_subs.ass"
 				subtitle_result = segments_to_ass(
 					segments=all_segments,
 					clip_start=clip["start"],
@@ -228,7 +230,7 @@ def cut_clips(
 
 			# Stage 3 - Visual enhancement (critical)
 			logger.info("Clip %s - Stage 3: Visual enhancement", index)
-			enhanced_filename = f"clip_{index}_{sanitized_label}_enhanced.mp4"
+			enhanced_filename = f"{filename_prefix}_{index}_{sanitized_label}_enhanced.mp4"
 			enhanced_path = output_directory / enhanced_filename
 			try:
 				width, height = get_video_dimensions(str(raw_clip_path))
@@ -241,7 +243,7 @@ def cut_clips(
 					input_path=str(raw_clip_path),
 					output_path=str(enhanced_path),
 					clip_duration=duration,
-					watermark_text="✦ Gulfam",
+					watermark_text=config.WATERMARK_TEXT,
 					subtitle_path=subtitle_path,
 					is_shorts=is_shorts,
 					face_center_x=face_x,
@@ -257,7 +259,7 @@ def cut_clips(
 
 			# Stage 4 - Add music with ducking (fallback to enhanced clip)
 			logger.info("Clip %s - Stage 4: Add music with ducking", index)
-			final_filename = f"clip_{index}_{sanitized_label}.mp4"
+			final_filename = f"{filename_prefix}_{index}_{sanitized_label}.mp4"
 			final_path = output_directory / final_filename
 			has_music = False
 			final_video_path = final_path
@@ -302,7 +304,7 @@ def cut_clips(
 
 			# Stage 6 - Thumbnail generation from final output (optional, non-critical)
 			logger.info("Clip %s - Stage 6: Thumbnail generation", index)
-			thumbnail_filename = f"clip_{index}_thumb.jpg"
+			thumbnail_filename = f"{filename_prefix}_{index}_thumb.jpg"
 			thumbnail_output_path = output_directory / thumbnail_filename
 			thumbnail_timestamp = duration / 2
 			thumbnail_path = generate_thumbnail(
@@ -511,4 +513,4 @@ def cut_all_shorts(
 
 
 if __name__ == "__main__":
-	print("clipper.py loaded successfully")
+	logger.info("clipper.py loaded successfully")

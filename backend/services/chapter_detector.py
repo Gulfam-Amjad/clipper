@@ -336,4 +336,4 @@ def format_chapters_for_youtube(chapters: list[dict]) -> str:
 
 # Allow direct execution for a quick import sanity check.
 if __name__ == "__main__":
-    print("chapter_detector.py loaded OK")
+    logger.info("chapter_detector.py loaded OK")

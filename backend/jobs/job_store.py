@@ -34,8 +34,13 @@ def create_job(job_id: str) -> None:
                 "status": "queued",
                 "progress": 0,
                 "current_step": "Job queued...",
-                "clips": None,
+                "message": "Job queued...",
+                "clips": [],
+                "shorts_clips": [],
                 "error": None,
+                "music_style": None,
+                "chapters": [],
+                "youtube_chapters": "",
             }
             logger.info(f"Created new job: {job_id}")
     except Exception as e:
@@ -64,6 +69,7 @@ def update_job(job_id: str, status: str, current_step: str, progress: int) -> No
             
             jobs[job_id]["status"] = status
             jobs[job_id]["current_step"] = current_step
+            jobs[job_id]["message"] = current_step
             jobs[job_id]["progress"] = progress
             
             logger.debug(f"Updated job {job_id}: status={status}, progress={progress}%")
@@ -116,6 +122,7 @@ def mark_done(job_id: str, clips: list) -> None:
             jobs[job_id]["status"] = "done"
             jobs[job_id]["progress"] = 100
             jobs[job_id]["current_step"] = "All clips ready!"
+            jobs[job_id]["message"] = "All clips ready!"
             jobs[job_id]["clips"] = clips
             
             logger.info(f"Marked job as done: {job_id} with {len(clips)} clip(s)")
@@ -144,6 +151,7 @@ def mark_error(job_id: str, error_msg: str) -> None:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = error_msg
             jobs[job_id]["current_step"] = "Processing failed."
+            jobs[job_id]["message"] = "Processing failed."
             jobs[job_id]["progress"] = 0
             
             logger.error(f"Marked job as error: {job_id} - {error_msg}")

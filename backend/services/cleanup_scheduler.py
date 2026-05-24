@@ -6,6 +6,8 @@ import pathlib
 import shutil
 from datetime import datetime, timedelta
 
+from ..config import config
+
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
 except Exception:
@@ -29,17 +31,17 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
-def cleanup_old_jobs(temp_dir: str = "temp", max_age_hours: int = 1) -> int:
+def cleanup_old_jobs(temp_dir: str | None = None, max_age_hours: int | None = None) -> int:
     """Delete temp job folders older than the configured age threshold."""
     try:
         # Validate the temporary directory before scanning for jobs.
-        temp_path = pathlib.Path(temp_dir)
+        temp_path = pathlib.Path(temp_dir or config.TEMP_DIR)
         if not temp_path.exists():
             logger.warning("Temp directory does not exist: %s", temp_dir)
             return 0
 
         # Compute the cutoff time once so each folder can be compared consistently.
-        cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
+        cutoff_time = datetime.now() - timedelta(hours=(max_age_hours or config.MAX_JOB_AGE_HOURS))
 
         # Scan only job folders that match the expected naming pattern.
         deleted_count = 0
@@ -85,18 +87,18 @@ def start_cleanup_scheduler() -> BackgroundScheduler:
             replace_existing=True,
         )
 
-        # Run the cleanup every 30 minutes to keep temp storage under control.
+        # Run the cleanup on the configured interval to keep temp storage under control.
         scheduler.add_job(
             cleanup_old_jobs,
             trigger="interval",
-            minutes=30,
+            minutes=config.CLEANUP_INTERVAL_MINUTES,
             id="cleanup_old_jobs_interval",
             replace_existing=True,
         )
 
         # Start the scheduler after all jobs are registered.
         scheduler.start()
-        logger.info("Cleanup scheduler started — runs every 30 minutes")
+        logger.info("Cleanup scheduler started — runs every %s minutes", config.CLEANUP_INTERVAL_MINUTES)
         return scheduler
     except Exception:
         logger.exception("Failed to start cleanup scheduler")
@@ -117,7 +119,7 @@ def stop_cleanup_scheduler(scheduler: BackgroundScheduler) -> None:
 # Allow direct execution for a simple sanity check.
 if __name__ == "__main__":
     scheduler = start_cleanup_scheduler()
-    print("Scheduler running — press Ctrl+C to stop")
+    logger.info("Scheduler running — press Ctrl+C to stop")
     import time
 
     time.sleep(5)

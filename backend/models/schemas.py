@@ -40,10 +40,13 @@ class JobStatus(BaseModel):
     """Status and progress information for a video processing job."""
     status: Literal["queued", "downloading", "extracting_audio", "transcribing", "analyzing", "cutting", "creating_shorts", "done", "error"]
     current_step: str
+    message: Optional[str] = None
     progress: int
     clips: Optional[list[ClipInfo]] = None
     shorts_clips: Optional[list[ClipInfo]] = None
     music_style: Optional[str] = "lofi"
+    chapters: Optional[list[dict]] = None
+    youtube_chapters: Optional[str] = ""
     error: Optional[str] = None
     
     @field_validator("progress")

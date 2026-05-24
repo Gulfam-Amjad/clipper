@@ -7,6 +7,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from ..config import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ def create_job_folder(job_id: str) -> str:
         Logs error but doesn't crash if folder already exists
     """
     try:
-        job_path = Path("temp") / f"job_{job_id}"
+        job_path = Path(config.TEMP_DIR) / f"job_{job_id}"
         job_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created job folder: {job_path}")
         return str(job_path)
@@ -46,7 +48,7 @@ def get_job_path(job_id: str) -> str:
         Full path to the job folder as string
     """
     try:
-        job_path = Path("temp") / f"job_{job_id}"
+        job_path = Path(config.TEMP_DIR) / f"job_{job_id}"
         logger.debug(f"Retrieved job path for job_id {job_id}: {job_path}")
         return str(job_path)
     except Exception as e:
@@ -67,7 +69,7 @@ def cleanup_job_folder(job_id: str) -> None:
         None
     """
     try:
-        job_path = Path("temp") / f"job_{job_id}"
+        job_path = Path(config.TEMP_DIR) / f"job_{job_id}"
         
         if job_path.exists():
             shutil.rmtree(job_path)

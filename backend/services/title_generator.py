@@ -364,4 +364,4 @@ def generate_all_metadata(clips: list[dict], segments: list[dict]) -> list[dict]
 
 # Test module import path manually when run as a script.
 if __name__ == "__main__":
-    print("title_generator.py loaded OK")
+    logger.info("title_generator.py loaded OK")

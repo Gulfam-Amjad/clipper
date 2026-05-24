@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 
 # Test validators
-from utils.validators import validate_video_file, sanitize_label, validate_clip_bounds
+from backend.utils.validators import validate_video_file, sanitize_label, validate_clip_bounds
 
 
 class TestVideoFileValidation:
@@ -120,16 +120,17 @@ class TestClipBoundsValidation:
             validate_clip_bounds(clips)
     
     def test_clip_too_short(self):
-        """Test that clips under 30 seconds are rejected."""
+        """Test that clips under 30 seconds are skipped."""
         clips = [{"start": 0.0, "end": 20.0, "label": "Too short"}]
-        with pytest.raises(ValueError, match="outside the allowed"):
-            validate_clip_bounds(clips)
+        result = validate_clip_bounds(clips)
+        assert result == []
     
     def test_clip_too_long(self):
-        """Test that clips over 180 seconds are rejected."""
+        """Test that clips over 180 seconds are capped."""
         clips = [{"start": 0.0, "end": 200.0, "label": "Too long"}]
-        with pytest.raises(ValueError, match="outside the allowed"):
-            validate_clip_bounds(clips)
+        result = validate_clip_bounds(clips)
+        assert len(result) == 1
+        assert result[0]["end"] == 180.0
     
     def test_overlapping_clips(self):
         """Test that overlapping clips are detected."""
@@ -155,7 +156,7 @@ class TestJobStore:
     
     def test_create_and_get_job(self):
         """Test creating and retrieving a job."""
-        from jobs.job_store import create_job, get_job
+        from backend.jobs.job_store import create_job, get_job
         
         job_id = "test-job-123"
         create_job(job_id)
@@ -167,14 +168,14 @@ class TestJobStore:
     
     def test_get_nonexistent_job(self):
         """Test that getting nonexistent job returns None."""
-        from jobs.job_store import get_job
+        from backend.jobs.job_store import get_job
         
         job = get_job("nonexistent-job")
         assert job is None
     
     def test_update_job(self):
         """Test updating job status."""
-        from jobs.job_store import create_job, update_job, get_job
+        from backend.jobs.job_store import create_job, update_job, get_job
         
         job_id = "update-test-123"
         create_job(job_id)
@@ -190,7 +191,7 @@ class TestTranscriptFormatting:
     
     def test_format_transcript(self):
         """Test transcript formatting."""
-        from services.analyzer import format_transcript
+        from backend.services.analyzer import format_transcript
         
         segments = [
             {"start": 0.0, "end": 10.5, "text": "Hello world"},
@@ -207,7 +208,7 @@ class TestLLMResponseParsing:
     
     def test_parse_valid_json_response(self):
         """Test parsing valid JSON response."""
-        from services.analyzer import parse_llm_response
+        from backend.services.analyzer import parse_llm_response
         
         response = json.dumps([
             {"start": 0.0, "end": 60.0, "label": "Intro"},
@@ -215,12 +216,14 @@ class TestLLMResponseParsing:
         ])
         
         result = parse_llm_response(response)
-        assert len(result) == 2
-        assert result[0]["label"] == "Intro"
+        clips, music_style = result
+        assert music_style == "lofi"
+        assert len(clips) == 2
+        assert clips[0]["label"] == "Intro"
     
     def test_parse_json_with_markdown_fence(self):
         """Test parsing JSON wrapped in markdown code fence."""
-        from services.analyzer import parse_llm_response
+        from backend.services.analyzer import parse_llm_response
         
         response = """```json
 [
@@ -229,18 +232,20 @@ class TestLLMResponseParsing:
 ```"""
         
         result = parse_llm_response(response)
-        assert len(result) == 1
+        clips, music_style = result
+        assert music_style == "lofi"
+        assert len(clips) == 1
     
     def test_parse_invalid_json(self):
         """Test that invalid JSON raises error."""
-        from services.analyzer import parse_llm_response
+        from backend.services.analyzer import parse_llm_response
         
         with pytest.raises(ValueError, match="Invalid JSON"):
             parse_llm_response("not valid json")
     
     def test_parse_missing_required_fields(self):
         """Test that missing required fields are caught."""
-        from services.analyzer import parse_llm_response
+        from backend.services.analyzer import parse_llm_response
         
         response = json.dumps([
             {"start": 0.0, "label": "Missing end field"}
@@ -255,7 +260,7 @@ class TestAnalyzedClipRepair:
 
     def test_repair_zero_length_clip(self):
         """Test that a zero-length clip is expanded into a valid window."""
-        from services.analyzer import _repair_analyzed_clips
+        from backend.services.analyzer import _repair_analyzed_clips
 
         segments = [
             {"start": 0.0, "end": 20.0, "text": "Intro"},

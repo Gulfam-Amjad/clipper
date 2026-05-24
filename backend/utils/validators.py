@@ -7,11 +7,13 @@ import logging
 import re
 from typing import Tuple
 
+from ..config import config
+
 logger = logging.getLogger(__name__)
 
 # Constants
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
-MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500MB
+MAX_FILE_SIZE_BYTES = int(config.MAX_FILE_SIZE_MB * 1024 * 1024)
 
 
 def validate_video_file(filename: str, file_size_bytes: int) -> Tuple[bool, str]:
@@ -115,8 +117,9 @@ def validate_clip_bounds(clips: list[dict]) -> list[dict]:
     Validates clip timing rules before ffmpeg cuts are attempted.
 
     Ensures each clip has required fields, uses non-negative timestamps,
-    has a positive duration, stays within the expected 30s-180s range,
-    and does not overlap with the next clip.
+    has a positive duration, and does not overlap with the next clip.
+    Clips that are shorter than 30s are skipped (logged) rather than
+    causing the whole validation to fail.
     """
     try:
         normalized_clips: list[dict] = []
@@ -138,10 +141,17 @@ def validate_clip_bounds(clips: list[dict]) -> list[dict]:
                 raise ValueError(f"Clip {index} end must be greater than start")
 
             duration = end - start
-            if duration < 30 or duration > 180:
-                raise ValueError(
-                    f"Clip {index} duration {duration:.1f}s is outside the allowed 30-180s range"
+            if duration < 30:
+                logger.warning(
+                    f"Clip {index} duration {duration:.1f}s is below minimum 30s — skipping"
                 )
+                continue
+
+            if duration > 180:
+                logger.warning(
+                    f"Clip {index} duration {duration:.1f}s exceeds 180s — capping to 180s"
+                )
+                end = start + 180.0
 
             normalized_clips.append(
                 {

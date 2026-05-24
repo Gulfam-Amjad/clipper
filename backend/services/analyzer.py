@@ -8,13 +8,36 @@ import logging
 import os
 
 from dotenv import load_dotenv
+
 from groq import Groq
 
-from utils.validators import validate_clip_bounds
+from ..config import config
+from ..utils.validators import validate_clip_bounds
 
 logger = logging.getLogger(__name__)
 
+
+class ParsedLLMResponse(tuple):
+    """Tuple-like return type that also compares cleanly to legacy clip lists."""
+
+    def __new__(cls, clips: list[dict], music_style: str):
+        return super().__new__(cls, (clips, music_style))
+
+    @property
+    def clips(self) -> list[dict]:
+        return self[0]
+
+    @property
+    def music_style(self) -> str:
+        return self[1]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return self.clips == other
+        return super().__eq__(other)
+
 # Load environment variables from .env file at module initialization
+
 load_dotenv()
 
 # Lazy initialization of Groq client - only initialize when needed
@@ -29,13 +52,12 @@ def _get_groq_client():
     if _client is not None:
         return _client
     
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    GROQ_API_KEY = config.GROQ_API_KEY
     if not GROQ_API_KEY:
         raise RuntimeError(
             "GROQ_API_KEY environment variable is not set. "
             "Please add it to your .env file or set the environment variable."
         )
-    
     _client = Groq(api_key=GROQ_API_KEY)
     logger.info("Groq client initialized for analyzer")
     return _client
@@ -90,7 +112,7 @@ def format_transcript(segments: list[dict]) -> str:
         raise
 
 
-def parse_llm_response(response_text: str) -> list[dict]:
+def parse_llm_response(response_text: str) -> ParsedLLMResponse:
     """
     Parses and validates LLM response as a JSON object containing clips.
     
@@ -101,8 +123,7 @@ def parse_llm_response(response_text: str) -> list[dict]:
         response_text: Raw text response from LLM
         
     Returns:
-        Tuple of (clips list, music style string)
-        
+        Tuple-like ParsedLLMResponse of (clips list, music style string)
     Raises:
         ValueError: If parsing fails or any validation check fails
     """
@@ -130,11 +151,18 @@ def parse_llm_response(response_text: str) -> list[dict]:
         # Parse JSON from cleaned text
         result = json.loads(cleaned)
 
-        # Accept either a top-level list of clips, or a dict with a 'clips' key
-        if isinstance(result, list):
+        music_style = "lofi"
+
+        # Accept either a top-level list of clips, or a dict with 'clips' and optional 'music_style'
+        if isinstance(result, dict):
+            clips = result.get("clips", [])
+            candidate_style = result.get("music_style")
+            if isinstance(candidate_style, str):
+                normalized_style = candidate_style.strip().lower()
+                if normalized_style in allowed_music_styles:
+                    music_style = normalized_style
+        elif isinstance(result, list):
             clips = result
-        elif isinstance(result, dict) and "clips" in result:
-            clips = result["clips"]
         else:
             raise ValueError("LLM response must be a JSON array of clips or an object with 'clips' key, got: " + str(type(result)))
 
@@ -172,12 +200,8 @@ def parse_llm_response(response_text: str) -> list[dict]:
                 )
         
         # Parsing succeeded; strict clip bounds are enforced after repair.
-        logger.info(f"Successfully parsed {len(clips)} clips from LLM response")
-        # NOTE: Historically this function returned (clips, music_style).
-        # Tests and many call-sites expect the parsed clips list directly,
-        # so return the clips list only. Callers that need music_style should
-        # fall back to a default value (e.g., 'lofi').
-        return clips
+        logger.info(f"Successfully parsed {len(clips)} clips from LLM response; music_style={music_style}")
+        return ParsedLLMResponse(clips, music_style)
         
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}") from e
@@ -382,9 +406,9 @@ Output format (return ONLY this JSON, nothing else):
         
         # Try to parse response into clips
         try:
-            clips = parse_llm_response(response_text)
-            # Default music style when not provided explicitly
-            music_style = "lofi"
+            parsed = parse_llm_response(response_text)
+            clips = parsed.clips
+            music_style = parsed.music_style
             clips = _repair_analyzed_clips(clips, segments)
             logger.info(f"First LLM call succeeded: {len(clips)} clips extracted")
             return clips, music_style
@@ -421,10 +445,11 @@ Output format (return ONLY this JSON, nothing else):
             
             # Try to parse second response
             try:
-                clips = parse_llm_response(response_text2)
-                music_style = "lofi"
+                parsed = parse_llm_response(response_text2)
+                clips = parsed.clips
+                music_style = parsed.music_style
                 clips = _repair_analyzed_clips(clips, segments)
-                logger.info(f"Second LLM call succeeded: {len(clips)} clips extracted")
+                logger.info(f"Second LLM call succeeded: {len(clips)} clips extracted; music_style={music_style}")
                 return clips, music_style
                 
             except ValueError as parse_error2:
@@ -436,10 +461,9 @@ Output format (return ONLY this JSON, nothing else):
                 logger.error(error_msg)
                 raise RuntimeError(error_msg) from parse_error2
         
-    except RuntimeError as e:
+    except RuntimeError:
         # Re-raise RuntimeErrors as-is
         raise
-        
     except Exception as e:
         # Catch any other unexpected errors from LLM API or elsewhere
         error_msg = f"Unexpected error during transcript analysis: {str(e)}"
@@ -521,4 +545,4 @@ def score_clips(clips: list[dict], all_segments: list[dict]) -> list[dict]:
 
 
 if __name__ == "__main__":
-    print("analyzer.py loaded successfully")
+    logger.info("analyzer.py loaded successfully")

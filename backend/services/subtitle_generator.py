@@ -132,4 +132,4 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # Test module on import
 if __name__ == "__main__":
-	print("subtitle_generator.py loaded OK")
+	logger.info("subtitle_generator.py loaded OK")

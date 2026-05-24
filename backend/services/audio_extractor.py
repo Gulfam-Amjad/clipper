@@ -102,4 +102,4 @@ def extract_audio(video_path: str, output_path: str) -> str:
 
 
 if __name__ == "__main__":
-    print("audio_extractor.py loaded successfully")
+    logger.info("audio_extractor.py loaded successfully")
