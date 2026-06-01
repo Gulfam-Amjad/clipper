@@ -22,6 +22,16 @@ FORMAT_PRESETS = {}
 SUPPORTED_LANGUAGES_FALLBACK = {"en": "English", "ur": "Urdu", "ar": "Arabic"}
 POLL_INTERVAL_SECONDS = 3
 MAX_FILE_SIZE_MB = 500
+STEP_ICONS = {
+    "downloading":           "⬇️",
+    "extracting_audio":      "🎵",
+    "transcribing":          "📝",
+    "analyzing":             "🧠",
+    "cutting":               "✂️",
+    "creating_shorts":       "📱",
+    "generating_seo":        "🔍",
+    "generating_thumbnails": "🖼️",
+}
 
 # Page configuration
 st.set_page_config(
@@ -31,7 +41,30 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Session state will be initialized after helper functions are defined
+def init_session_state():
+    defaults = {
+        "job_id": None,
+        "job_history": [],
+        "processing": False,
+        "mode": "Upload Video",
+        "guidance": "",
+        "generate_shorts": False,
+        "language": "en",
+        "preview_cache": {},
+        "filter_output_by_clip": {},
+        "show_preview_for_clip": {},
+        "copy_text": "",
+        "last_upload": None,
+        "confirm_new_job": False,
+        "yt_connected": False,
+        "yt_auth_url": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+# Initialize session state now that helper functions are defined
+init_session_state()
 
 # Custom CSS for better styling
 st.markdown(
@@ -64,31 +97,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def init_session_state():
-    defaults = {
-        "job_id": None,
-        "job_history": [],
-        "processing": False,
-        "mode": "Upload Video",
-        "guidance": "",
-        "generate_shorts": False,
-        "language": "en",
-        "preview_cache": {},
-        "filter_output_by_clip": {},
-        "show_preview_for_clip": {},
-        "copy_text": "",
-        "last_upload": None,
-        "confirm_new_job": False,
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-# Initialize session state now that helper functions are defined
-init_session_state()
 
 
 def safe_rerun():
@@ -348,6 +356,52 @@ def render_sidebar():
                     st.session_state.job_id = entry["job_id"]
                     safe_rerun()
                 st.markdown("---")
+        
+        st.divider()
+        st.markdown("### 📺 YouTube")
+
+        try:
+            yt_r = requests.get(f"{BACKEND_URL}/youtube-status", timeout=5)
+            yt_connected = yt_r.json().get("connected", False)
+        except:
+            yt_connected = False
+
+        st.session_state.yt_connected = yt_connected
+
+        if yt_connected:
+            st.success("✅ YouTube Connected")
+            st.caption("Ready to upload clips directly")
+        else:
+            st.warning("⚠️ Not Connected")
+            if st.button("🔗 Connect YouTube", key="connect_yt_btn"):
+                try:
+                    r = requests.get(f"{BACKEND_URL}/youtube-auth-url", timeout=5)
+                    data = r.json()
+                    if "auth_url" in data:
+                        st.session_state.yt_auth_url = data["auth_url"]
+                    else:
+                        st.error(data.get("error", "Setup required"))
+                        if "setup_guide" in data:
+                            st.info(data["setup_guide"])
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            
+            if st.session_state.get("yt_auth_url"):
+                st.markdown(f"**[1. Click here to authorize]({st.session_state.yt_auth_url})**")
+                code = st.text_input("2. Paste code here:", key="yt_code_input")
+                if st.button("✅ Connect", key="yt_connect_confirm"):
+                    if code:
+                        try:
+                            r = requests.post(f"{BACKEND_URL}/youtube-connect",
+                                             json={"auth_code": code}, timeout=15)
+                            if r.json().get("success"):
+                                st.success("Connected!")
+                                st.session_state.yt_auth_url = None
+                                st.rerun()
+                            else:
+                                st.error("Failed — check the code")
+                        except:
+                            st.error("Connection error")
 
 
 def render_status_badge(status):
@@ -372,8 +426,6 @@ def render_footer():
 
 
 def main():
-    init_session_state()
-
     st.markdown(
         '<div class="main-header"><h1>🎬 VideoClipper - AI-Powered Video Clip Generator</h1></div>',
         unsafe_allow_html=True,
@@ -384,7 +436,7 @@ def main():
         st.warning(
             f"Backend is offline at {BACKEND_URL}. Processing, preview, and downloads require the backend."
         )
-        st.info("Start it with: cd backend && python main.py")
+        st.info("Start it with: cd backend && uvicorn main:app --reload")
 
     render_sidebar()
 
@@ -398,426 +450,252 @@ def main():
                     type=["mp4", "mov", "avi", "mkv"],
                     help="Maximum size: 500MB",
                 )
-
-                if video_file is not None:
-                    # Persist the uploaded bytes in session so retries don't require re-upload
-                    try:
-                        b = video_file.getvalue()
-                        st.session_state.last_upload = {"name": video_file.name, "bytes": b, "type": video_file.type}
-                    except Exception:
-                        st.session_state.last_upload = None
-
-                    st.video(video_file)
-                    st.caption("Local preview")
-
-                    preview_key = f"preview_{(video_file.name if hasattr(video_file, 'name') else st.session_state.get('last_upload', {}).get('name',''))}"
-                    if preview_key not in st.session_state.preview_cache and backend_available:
-                        with st.spinner("Requesting preview metadata..."):
-                            try:
-                                response = requests.post(
-                                    f"{BACKEND_URL}/preview-upload",
-                                    files={
-                                        "video": (
-                                            video_file.name,
-                                            video_file.getvalue(),
-                                            video_file.type or "video/mp4",
-                                        )
-                                    },
-                                    timeout=30,
-                                )
-                                if response.status_code == 200:
-                                    st.session_state.preview_cache[preview_key] = response.json()
-                            except Exception:
-                                pass
-
-                    preview_data = st.session_state.preview_cache.get(preview_key)
-                    if preview_data:
-                        metadata = preview_data.get("metadata", {})
-                        warnings = preview_data.get("warnings", [])
-                        st.markdown("**Video metadata**")
-                        st.write(f"Duration: {metadata.get('duration_str', 'Unknown')}")
-                        st.write(f"Resolution: {metadata.get('width', 0)}×{metadata.get('height', 0)}")
-                        st.write(f"FPS: {metadata.get('fps', 0):.1f}")
-                        st.write(f"Size: {metadata.get('file_size_mb', 0):.1f} MB")
-                        st.write(f"Audio: {'Yes' if metadata.get('has_audio') else 'No'}")
-                        for warning in warnings:
-                            st.warning(f"⚠️ {warning}")
-                else:
-                    st.info("Select a video file to upload and process.")
-
+                if video_file:
+                    st.session_state.last_upload = {
+                        "name": video_file.name,
+                        "bytes": video_file.getvalue(),
+                        "type": video_file.type,
+                    }
             with right:
-                if st.button("🚀 Process Video", key="process_video_btn", use_container_width=True, disabled=not backend_available):
-                    # Use persisted upload if available, otherwise use the freshly selected file
-                    source = "Upload"
-                    file_payload = None
-                    if st.session_state.get("last_upload") is not None:
-                        file_payload = st.session_state.last_upload
-                    elif video_file is not None:
-                        file_payload = video_file
+                st.markdown("#### Options")
+                st.info("Set guidance and options in the sidebar.")
+                if st.button("🚀 Start Processing", type="primary", disabled=not video_file):
+                    job_id = upload_video(
+                        video_file,
+                        st.session_state.guidance,
+                        st.session_state.generate_shorts,
+                        st.session_state.language,
+                    )
+                    if job_id:
+                        st.session_state.job_id = job_id
+                        add_job_to_history(
+                            job_id,
+                            video_file.name,
+                            st.session_state.guidance,
+                            st.session_state.language,
+                            st.session_state.generate_shorts,
+                        )
+                        safe_rerun()
 
-                    if file_payload is None:
-                        st.warning("Please select a file before processing.")
-                    else:
-                        with st.spinner("Uploading video and starting processing..."):
-                            job_id = upload_video(
-                                file_payload,
-                                st.session_state.guidance,
-                                st.session_state.generate_shorts,
-                                st.session_state.language,
-                            )
-                            if job_id:
-                                st.session_state.job_id = job_id
-                                add_job_to_history(
-                                    job_id,
-                                    source,
-                                    st.session_state.guidance,
-                                    st.session_state.language,
-                                    st.session_state.generate_shorts,
-                                )
-                                safe_rerun()
-
-        else:
+        elif st.session_state.mode == "YouTube URL":
             left, right = st.columns([2, 1])
             with left:
-                youtube_url = st.text_input(
-                    "YouTube URL",
-                    placeholder="https://www.youtube.com/watch?v=...",
-                    help="Paste a valid YouTube link",
-                    key="youtube_url",
-                )
-
-                if youtube_url and backend_available:
-                    with st.spinner("Fetching YouTube video info..."):
-                        info = get_video_info(youtube_url)
-                    if info:
-                        st.markdown("**Video info**")
-                        st.write(f"Title: {info.get('title', 'Unknown')}")
-                        duration = info.get('duration', 0)
-                        st.write(f"Duration: {duration // 60} min")
-                        st.write(f"Channel: {info.get('uploader', 'Unknown')}")
-
-            with right:
-                if st.button("🚀 Process URL", key="process_url_btn", use_container_width=True, disabled=not backend_available):
-                    youtube_url = st.session_state.get("youtube_url", "") if "youtube_url" in st.session_state else ""
-                    if not youtube_url:
-                        st.warning("Please enter a YouTube URL first.")
+                youtube_url = st.text_input("Enter a YouTube video URL")
+                if youtube_url:
+                    video_info = get_video_info(youtube_url)
+                    if video_info:
+                        st.markdown(f"**Title:** {video_info.get('title', 'N/A')}")
+                        if "thumbnail" in video_info:
+                            st.image(video_info["thumbnail"], width=320)
                     else:
-                        with st.spinner("Submitting URL for processing..."):
-                            job_id = process_youtube_url(
-                                youtube_url,
-                                st.session_state.guidance,
-                                st.session_state.generate_shorts,
-                                st.session_state.language,
-                            )
-                            if job_id:
-                                st.session_state.job_id = job_id
-                                add_job_to_history(
-                                    job_id,
-                                    "YouTube URL",
-                                    st.session_state.guidance,
-                                    st.session_state.language,
-                                    st.session_state.generate_shorts,
-                                )
-                                safe_rerun()
-
-            st.info("Use a public YouTube URL and wait a moment for the backend to fetch and analyze the video.")
-
+                        st.warning("Could not fetch video info.")
+            with right:
+                st.markdown("#### Options")
+                st.info("Set guidance and options in the sidebar.")
+                if st.button("🚀 Start Processing", type="primary", disabled=not youtube_url):
+                    job_id = process_youtube_url(
+                        youtube_url,
+                        st.session_state.guidance,
+                        st.session_state.generate_shorts,
+                        st.session_state.language,
+                    )
+                    if job_id:
+                        st.session_state.job_id = job_id
+                        add_job_to_history(
+                            job_id,
+                            youtube_url,
+                            st.session_state.guidance,
+                            st.session_state.language,
+                            st.session_state.generate_shorts,
+                        )
+                        safe_rerun()
     else:
         job_id = st.session_state.job_id
-        st.subheader(f"Processing Job: {job_id[:8]}")
-
         status_data = get_job_status(job_id)
-        if status_data is None:
-            st.error("Unable to retrieve job status. The job may have expired or the backend may be offline.")
-            if st.button("Start a new job", use_container_width=True):
-                st.session_state.job_id = None
+
+        if status_data:
+            status = status_data.get("status", "unknown")
+            label, badge_class = render_status_badge(status)
+            st.markdown(f'Job Status: <span class="status-badge {badge_class}">{label}</span>', unsafe_allow_html=True)
+
+            if status not in ["done", "error", "failed"]:
+                st.session_state.processing = True
+                progress = status_data.get("progress", 0)
+                
+                icon = STEP_ICONS.get(status_data.get("status", ""), "⚙️")
+                current_step = status_data.get("current_step", "Processing...")
+                st.info(f"{icon} {current_step}")
+
+                st.progress(progress / 100)
+                if status_data.get("cache_used"):
+                    st.caption("⚡ Using cached transcript — faster processing!")
+
+                time.sleep(POLL_INTERVAL_SECONDS)
                 safe_rerun()
-            render_footer()
-            return
+            else:
+                st.session_state.processing = False
+                if status == "error":
+                    st.error(f"Job failed: {status_data.get('error', 'Unknown error')}")
+                else:
+                    st.success("✅ Processing complete!")
+                    results = status_data
+                    clips = results.get("clips", [])
+                    st.subheader(f"Generated Clips ({len(clips)})")
 
-        status = status_data.get("status", "unknown")
-        progress = status_data.get("progress", 0)
-        message = status_data.get("message") or status_data.get("current_step", "Processing...")
+                    for i, clip in enumerate(clips):
+                        col_thumb, col_info, col_dl = st.columns([1, 2, 1])
 
-        status_text, status_class = render_status_badge(status)
-        st.markdown(
-            f'<p style="font-size: 18px;"><span class="status-badge {status_class}">{status_text}</span></p>',
-            unsafe_allow_html=True,
-        )
-        st.progress(min(progress / 100.0, 1.0))
-        st.write(f"**Progress:** {progress}% — {message}")
-
-        buttons = st.columns([1, 1, 2])
-        if buttons[0].button("🔄 Refresh Status"):
-            safe_rerun()
-        if buttons[1].button("🏠 New Job"):
-            # require confirmation to avoid accidental loss
-            st.session_state.confirm_new_job = True
-
-        if st.session_state.get("confirm_new_job"):
-            st.warning("This will delete temporary files for the current job. Confirm to continue.")
-            c1, c2 = st.columns([1, 1])
-            if c1.button("Confirm New Job"):
-                cleanup_job(job_id)
-                st.session_state.job_id = None
-                st.session_state.confirm_new_job = False
-                safe_rerun()
-            if c2.button("Cancel"):
-                st.session_state.confirm_new_job = False
-                safe_rerun()
-
-        if not backend_available:
-            st.error(backend_unavailable_message("Status and download actions"))
-            render_footer()
-            return
-
-        st.divider()
-
-        if status == "done":
-            st.success("✅ Processing completed successfully!")
-            clips = status_data.get("clips", [])
-            if clips:
-                st.subheader(f"Generated Clips ({len(clips)})")
-                for idx, clip in enumerate(clips, start=1):
-                    filename = clip.get("filename", "")
-                    title = clip.get("title", f"Clip {idx}")
-                    start_ts = clip.get("start", 0)
-                    end_ts = clip.get("end", 0)
-                    duration = max(end_ts - start_ts, 0)
-                    viral_score = clip.get("combined_viral_score", 0)
-
-                    with st.container():
-                        c1, c2, c3 = st.columns([3, 1, 1])
-                        with c1:
-                            st.markdown(f"**{title}**")
-                            st.write(f"⏱ {start_ts:.1f}s – {end_ts:.1f}s ({duration:.1f}s)")
-                            st.write(f"Viral score: {viral_score}/100")
-                            if clip.get("viral_llm"):
-                                platform_fit = clip["viral_llm"].get("platform_fit", {})
-                                if platform_fit:
-                                    pcols = st.columns(3)
-                                    pcols[0].metric("YouTube", f"{platform_fit.get('youtube_shorts', 0)}%")
-                                    pcols[1].metric("TikTok", f"{platform_fit.get('tiktok', 0)}%")
-                                    pcols[2].metric("Instagram", f"{platform_fit.get('instagram', 0)}%")
-                                improvement = clip["viral_llm"].get("improvement")
-                                if improvement:
-                                    st.caption(f"💡 {improvement}")
-
-                        with c2:
-                            if st.button("⬇ Download clip", key=f"download_clip_{job_id}_{idx}"):
-                                clip_bytes = download_clip(job_id, filename)
-                                if clip_bytes:
-                                    st.download_button(
-                                        "Download now",
-                                        clip_bytes,
-                                        file_name=filename,
-                                        mime="video/mp4",
-                                        key=f"download_button_{job_id}_{idx}",
+                        with col_thumb:
+                            # Show professional thumbnail if available, fallback to basic
+                            pro_thumb = clip.get("pro_thumbnail_path")
+                            basic_thumb = clip.get("thumbnail_path")
+                            
+                            thumb_shown = False
+                            
+                            if pro_thumb:
+                                fname = os.path.basename(pro_thumb)
+                                try:
+                                    r = requests.get(
+                                        f"{BACKEND_URL}/download-thumbnail/{job_id}/{fname}", 
+                                        timeout=10
                                     )
-
-                            presets = load_filter_presets()
-                            preset_names = ["custom"] + list(presets.keys())
-                            selected_preset = st.selectbox(
-                                "Preset",
-                                preset_names,
-                                key=f"preset_{job_id}_{idx}",
-                            )
-                            if selected_preset != "custom" and selected_preset in presets:
-                                preset_values = presets[selected_preset]
-                            else:
-                                preset_values = {}
-
-                            brightness = st.slider(
-                                "Brightness",
-                                -0.5,
-                                0.5,
-                                float(preset_values.get("brightness", 0.0)),
-                                0.05,
-                                key=f"brightness_{job_id}_{idx}",
-                            )
-                            contrast = st.slider(
-                                "Contrast",
-                                0.5,
-                                2.0,
-                                float(preset_values.get("contrast", 1.0)),
-                                0.05,
-                                key=f"contrast_{job_id}_{idx}",
-                            )
-                            saturation = st.slider(
-                                "Saturation",
-                                0.0,
-                                3.0,
-                                float(preset_values.get("saturation", 1.0)),
-                                0.1,
-                                key=f"saturation_{job_id}_{idx}",
-                            )
-                            hue = st.slider(
-                                "Hue shift",
-                                -180,
-                                180,
-                                int(preset_values.get("hue", 0)),
-                                5,
-                                key=f"hue_{job_id}_{idx}",
-                            )
-                            sharpness = st.slider(
-                                "Sharpness",
-                                0.0,
-                                1.5,
-                                float(preset_values.get("sharpness", 0.0)),
-                                0.1,
-                                key=f"sharpness_{job_id}_{idx}",
-                            )
-                            vignette = st.slider(
-                                "Vignette",
-                                0.0,
-                                1.0,
-                                float(preset_values.get("vignette", 0.0)),
-                                0.1,
-                                key=f"vignette_{job_id}_{idx}",
-                            )
-                            fade_in = st.checkbox(
-                                "Fade in",
-                                value=bool(preset_values.get("fade_in", True)),
-                                key=f"fade_in_{job_id}_{idx}",
-                            )
-                            fade_out = st.checkbox(
-                                "Fade out",
-                                value=bool(preset_values.get("fade_out", True)),
-                                key=f"fade_out_{job_id}_{idx}",
-                            )
-
-                            if st.button("⚡ Apply filter", key=f"apply_filter_{job_id}_{idx}"):
-                                filter_values = {
-                                    "brightness": brightness,
-                                    "contrast": contrast,
-                                    "saturation": saturation,
-                                    "hue": hue,
-                                    "sharpness": sharpness,
-                                    "vignette": vignette,
-                                    "fade_in": fade_in,
-                                    "fade_out": fade_out,
-                                }
-                                with st.spinner("Applying filter..."):
-                                    try:
-                                        response = requests.post(
-                                            f"{BACKEND_URL}/apply-filter/{job_id}/{filename}",
-                                            json=filter_values,
-                                            timeout=120,
-                                        )
-                                        if response.status_code == 200:
-                                            result = response.json()
-                                            filtered_name = result.get("filtered_filename")
-                                            if filtered_name:
-                                                st.session_state.filter_output_by_clip[f"{job_id}_{idx}"] = filtered_name
-                                                st.success("Filtered clip ready")
-                                        else:
-                                            detail = response.json().get("detail", response.text)
-                                            st.error(f"Filter application failed: {detail}")
-                                    except Exception as exc:
-                                        st.error(f"Filter request failed: {exc}")
-
-                            filtered_name = st.session_state.filter_output_by_clip.get(f"{job_id}_{idx}")
-                            if filtered_name:
-                                st.write(f"Filtered clip: {filtered_name}")
-                                if st.button("⬇ Download filtered clip", key=f"download_filtered_{job_id}_{idx}"):
-                                    filtered_bytes = fetch_backend_bytes(
-                                        f"{BACKEND_URL}/download-filtered/{job_id}/{filtered_name}",
-                                        "Filtered download",
+                                    if r.status_code == 200:
+                                        st.image(r.content, use_column_width=True,
+                                                caption="📸 AI Thumbnail")
+                                        thumb_shown = True
+                                except:
+                                    pass
+                            
+                            if not thumb_shown and basic_thumb:
+                                fname = os.path.basename(basic_thumb)
+                                try:
+                                    r = requests.get(
+                                        f"{BACKEND_URL}/thumbnail/{job_id}/{fname}", 
+                                        timeout=10
                                     )
-                                    if filtered_bytes:
-                                        st.download_button(
-                                            "Download now",
-                                            filtered_bytes,
-                                            file_name=filtered_name,
-                                            mime="video/mp4",
-                                            key=f"download_filtered_button_{job_id}_{idx}",
-                                        )
+                                    if r.status_code == 200:
+                                        st.image(r.content, use_column_width=True)
+                                        thumb_shown = True
+                                except:
+                                    pass
+                            
+                            if not thumb_shown:
+                                st.markdown("🎬")
+                                st.caption("No preview")
 
-                        with c3:
-                            preview_key = f"show_preview_{job_id}_{idx}"
-                            if st.button("▶ Preview clip", key=f"preview_{job_id}_{idx}"):
-                                st.session_state.show_preview_for_clip[preview_key] = not st.session_state.show_preview_for_clip.get(preview_key, False)
-                            if st.session_state.show_preview_for_clip.get(preview_key):
-                                st.video(f"{BACKEND_URL}/download/{job_id}/{filename}")
-                                st.caption("Preview streamed from backend")
+                        with col_info:
+                            st.markdown(f"**{clip['label']}**")
+                            st.caption(f"🕒 {clip['start']:.1f}s - {clip['end']:.1f}s")
+                            st.caption(f"Quality Score: {clip.get('quality_score', 0):.1f}/100")
 
-                        with st.expander("YouTube metadata", expanded=False):
-                            if clip.get("title"):
-                                st.write(f"**Title:** {clip['title']}")
-                            if clip.get("description"):
-                                st.write(f"**Description:** {clip['description']}")
-                            if clip.get("hook"):
-                                st.write(f"**Hook:** {clip['hook']}")
-                            if clip.get("hashtags"):
-                                tags = " ".join([f"#{tag}" for tag in clip["hashtags"]])
-                                st.write(f"**Hashtags:** {tags}")
-                                if st.button("Copy hashtags", key=f"copy_tags_{job_id}_{idx}"):
-                                    st.session_state.copy_text = tags
-                                    st.success("Hashtags copied to session state")
+                            viral = clip.get("combined_viral_score", 0)
+                            if viral:
+                                v_emoji = "🔥" if viral >= 70 else "📈" if viral >= 40 else "📉"
+                                st.caption(f"Viral Potential: {v_emoji} {viral}/100")
+                                
+                                llm_viral = clip.get("viral_llm", {})
+                                pf = llm_viral.get("platform_fit", {})
+                                if pf:
+                                    c1, c2, c3 = st.columns(3)
+                                    c1.metric("YT Shorts", f"{pf.get('youtube_shorts',0)}%")
+                                    c2.metric("TikTok", f"{pf.get('tiktok',0)}%")
+                                    c3.metric("Instagram", f"{pf.get('instagram',0)}%")
+                                
+                                tip = llm_viral.get("improvement", "")
+                                if tip:
+                                    st.caption(f"💡 Tip: {tip}")
 
-            shorts_clips = status_data.get("shorts_clips", [])
-            if shorts_clips:
-                st.subheader(f"Shorts clips ({len(shorts_clips)})")
-                for idx, short in enumerate(shorts_clips, start=1):
-                    with st.container():
-                        st.write(f"**Short {idx}**")
-                        st.write(f"Score: {short.get('score', 0)}/100")
-                        filename = short.get("filename", "")
-                        if st.button("⬇ Download shorts", key=f"download_shorts_{job_id}_{idx}"):
-                            short_bytes = download_clip(job_id, filename, is_shorts=True)
-                            if short_bytes:
+                            with st.expander("🔍 Complete SEO Package", expanded=False):
+    
+                                # Title
+                                if clip.get("title"):
+                                    st.markdown("**📌 YouTube Title:**")
+                                    st.code(clip["title"], language=None)
+                                
+                                # Description
+                                if clip.get("description"):
+                                    st.markdown("**📝 Description:**")
+                                    st.text_area("desc", value=clip["description"], 
+                                                 height=120, key=f"seo_desc_{i}",
+                                                 label_visibility="collapsed")
+                                
+                                # Tags
+                                if clip.get("tags"):
+                                    st.markdown("**🏷 Tags:**")
+                                    tags_str = ", ".join(clip["tags"])
+                                    st.text_area("tags", value=tags_str, height=80,
+                                                 key=f"seo_tags_{i}",
+                                                 label_visibility="collapsed")
+                                
+                                # Hashtags
+                                if clip.get("hashtags"):
+                                    st.markdown("**# Hashtags:**")
+                                    ht_str = " ".join(clip["hashtags"])
+                                    st.code(ht_str, language=None)
+                                
+                                # Hook
+                                if clip.get("hook"):
+                                    st.markdown(f"**🎣 Hook:** *{clip['hook']}*")
+                                
+                                # SEO Score
+                                if clip.get("seo_score"):
+                                    score = clip["seo_score"]
+                                    emoji = "🟢" if score >= 70 else "🟡" if score >= 40 else "🔴"
+                                    col_s1, col_s2 = st.columns([1, 2])
+                                    col_s1.metric("SEO Score", f"{score}/100")
+                                    col_s2.progress(score / 100)
+
+                        with col_dl:
+                            clip_filename = Path(clip["output_path"]).name
+                            clip_data = download_clip(job_id, clip_filename)
+                            if clip_data:
                                 st.download_button(
-                                    "Download now",
-                                    short_bytes,
-                                    file_name=filename,
+                                    label="⬇️ Download Clip",
+                                    data=clip_data,
+                                    file_name=clip_filename,
                                     mime="video/mp4",
-                                    key=f"download_shorts_button_{job_id}_{idx}",
+                                    key=f"dl_{i}",
                                 )
+                            
+                            yt_connected = st.session_state.get("yt_connected", False)
+    
+                            if yt_connected:
+                                st.markdown("---")
+                                privacy_opt = st.selectbox(
+                                    "Privacy", 
+                                    ["private", "unlisted", "public"],
+                                    key=f"yt_privacy_{i}",
+                                    help="Private = only you can see"
+                                )
+                                
+                                yt_url = clip.get("youtube_url")
+                                if yt_url:
+                                    st.success("✅ Uploaded!")
+                                    st.markdown(f"[▶ View on YouTube]({yt_url})")
+                                else:
+                                    if st.button("📺 Upload to YouTube", 
+                                                key=f"yt_upload_{i}"):
+                                        with st.spinner("Uploading..."):
+                                            try:
+                                                r = requests.post(
+                                                    f"{BACKEND_URL}/upload-to-youtube/{job_id}/{i}",
+                                                    json={"privacy": privacy_opt},
+                                                    timeout=300
+                                                )
+                                                if r.status_code == 200:
+                                                    st.success(f"✅ Clip uploaded!")
+                                                    # Refresh status to get the new URL
+                                                    st.session_state.results = get_job_status(job_id)
+                                                    st.rerun()
+                                                else:
+                                                    st.error(f"Upload failed: {r.text}")
+                                            except Exception as e:
+                                                st.error(f"Error: {str(e)[:100]}")
 
-            if st.button("🗑️ Clean up and start a new job", use_container_width=True):
-                cleanup_job(job_id)
-                st.session_state.job_id = None
-                safe_rerun()
+                        st.divider()
 
-            chapters = status_data.get("chapters", [])
-            youtube_chapters = status_data.get("youtube_chapters", "")
-            if chapters or youtube_chapters:
-                st.divider()
-                st.subheader("Detected chapters")
-                for chapter in chapters:
-                    ts = chapter.get("timestamp_str") or str(chapter.get("start", 0))
-                    st.write(f"- {ts} {chapter.get('title', 'Chapter')}")
-                if youtube_chapters:
-                    st.text_area("YouTube chapters (copy-ready)", value=youtube_chapters, height=200)
-
-        elif status in ["error", "failed"]:
-            st.error("❌ An error occurred during processing.")
-            st.code(status_data.get("error", "Unknown error"))
-            if st.button("Start a new job", use_container_width=True):
-                st.session_state.confirm_new_job = True
-            # Allow retrying the failed job using the last uploaded file if available
-            if st.session_state.get("last_upload"):
-                if st.button("Retry with previous upload", use_container_width=True):
-                    with st.spinner("Retrying with stored upload..."):
-                        job_id_new = upload_video(
-                            st.session_state.last_upload,
-                            st.session_state.guidance,
-                            st.session_state.generate_shorts,
-                            st.session_state.language,
-                        )
-                        if job_id_new:
-                            st.session_state.job_id = job_id_new
-                            add_job_to_history(
-                                job_id_new,
-                                "Retry",
-                                st.session_state.guidance,
-                                st.session_state.language,
-                                st.session_state.generate_shorts,
-                            )
-                            safe_rerun()
-        else:
-            st.info("Processing is ongoing. The page refreshes automatically.")
-            time.sleep(POLL_INTERVAL_SECONDS)
+        if st.button("Process Another Video", key="process_another"):
+            st.session_state.job_id = None
             safe_rerun()
 
     render_footer()
