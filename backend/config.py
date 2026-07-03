@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 class Config:
 	GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+	GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 	TEMP_DIR = os.getenv("TEMP_DIR", "temp")
 	MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
@@ -37,4 +38,9 @@ config = Config()
 if config.GROQ_API_KEY == "":
 	logger.warning(
 		"GROQ_API_KEY is empty. The app will start, but Groq-powered features may fail until a key is configured."
+	)
+
+if config.GEMINI_API_KEY == "":
+	logger.info(
+		"GEMINI_API_KEY is empty. Gemini fallback is disabled; only Groq providers will be used."
 	)

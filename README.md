@@ -1,261 +1,150 @@
-# VideoClipper 🎬
+# VideoClipper AI
 
-An AI-powered video analysis tool that automatically identifies and extracts the most important clips from your videos. Using advanced transcription and language models, VideoClipper turns lengthy videos into bite-sized, shareable clips.
+An AI-powered video clipping tool that turns long videos into shareable highlight clips.
 
-## Features
+## What It Does
 
-- 🤖 **AI-Powered Analysis**: Uses Groq's Llama 3.3 LLM to intelligently identify key moments
-- 🎯 **Guided & Auto Modes**: Let AI decide what's important, or provide guidance on what to look for
-- ⚡ **Fast Processing**: Leverages Groq's fast inference for quick results
-- 🎥 **Multiple Format Support**: Works with MP4, MOV, AVI, and MKV videos (max 500MB)
-- 📊 **Real-time Progress**: Track processing status with live updates
-- 🔄 **4-5 Optimized Clips**: Generates 30-180 second clips for maximum shareability
-
-## Architecture
-
-### Backend (FastAPI)
-- **Audio Extraction**: Extracts mono 16kHz MP3 audio from video files
-- **Transcription**: Uses Groq Whisper API for accurate speech-to-text
-- **Clip Analysis**: LLM analyzes transcript to identify key moments
-- **Video Cutting**: FFmpeg creates clean, re-encoded video clips
-- **Job Management**: In-memory job store with thread-safe operations
-
-### Frontend (Streamlit)
-- User-friendly interface for video upload and processing
-- Real-time progress tracking
-- Clip preview and download functionality
-- Support for both guided and auto modes
+1. **Upload** a video (MP4, MOV, MKV, AVI)
+2. **Transcribe** the audio using Groq Whisper with word-level timestamps (long videos are automatically chunked)
+3. **Select clips** — Groq Llama 3.3 70B analyzes the transcript and picks the most viral-worthy moments, each with a catchy title, a ready-to-post description, hashtags, and a virality score (1–10). You control how many clips and their length range.
+4. **Export** — ffmpeg cuts each clip, with optional vertical 9:16 conversion (blurred-background fill, no black bars), animated word-by-word captions synced to each clip, audio loudness normalization, and background music
+5. **Download** individual clips (with copy-paste captions) or everything as a ZIP
 
 ## Prerequisites
 
-### System Requirements
-- Python 3.11+
-- FFmpeg (for video/audio processing)
-- 2GB+ RAM for video processing
-- Groq API key (free tier available at https://console.groq.com)
+- **Python 3.10+**
+- **ffmpeg** and **ffprobe** installed and available on your PATH  
+  Verify with: `ffmpeg -version` and `ffprobe -version`
+- A **Groq API key** — get one free at [console.groq.com](https://console.groq.com)
 
-### Installation
+## Setup
 
-1. **Clone the repository**
+### 1. Clone and enter the project
+
 ```bash
-git clone <repository-url>
 cd clipper
 ```
 
-2. **Set up environment variables**
-Create a `.env` file in the root directory:
-```
-GROQ_API_KEY=your_api_key_here
-BACKEND_URL=http://localhost:8000  # For frontend development
-```
-
-3. **Install FFmpeg**
-
-   **Windows (with Chocolatey):**
-   ```bash
-   choco install ffmpeg
-   ```
-   
-   **macOS (with Homebrew):**
-   ```bash
-   brew install ffmpeg
-   ```
-   
-   **Linux (Ubuntu/Debian):**
-   ```bash
-   sudo apt-get install ffmpeg
-   ```
-
-## Running Locally
-
-### Backend
+### 2. Create a virtual environment (if not already done)
 
 ```bash
-cd backend
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+```
+
+### 3. Configure environment variables
+
+Create or edit `.env` in the project root:
+
+```
+GROQ_API_KEY=your_actual_groq_api_key_here
+```
+
+Replace `your_actual_groq_api_key_here` with your real Groq API key.
+
+### 4. Install dependencies
+
+```bash
 pip install -r requirements.txt
-python main.py
 ```
 
-The API will be available at `http://localhost:8000`
-- Interactive docs: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+## Running the App
 
-### Frontend
+You need **two terminals** — one for the backend, one for the frontend.
 
-In a separate terminal:
+**Terminal 1 — Backend (FastAPI):**
+
 ```bash
-cd frontend
-pip install -r requirements.txt
-streamlit run app.py
+uvicorn backend.main:app --reload --port 8000
 ```
 
-The app will open at `http://localhost:8501`
-
-## Docker Deployment
-
-### Build and run with Docker
+**Terminal 2 — Frontend (Streamlit):**
 
 ```bash
-# Build the backend image
-docker build -t videoclipper-backend ./backend
+streamlit run frontend/app.py
+```
 
-# Run the container
-docker run -p 8000:8000 \
-  -e GROQ_API_KEY=your_api_key_here \
-  -v $(pwd)/temp:/app/temp \
-  videoclipper-backend
+Then open the Streamlit URL shown in the terminal (usually `http://localhost:8501`).
+
+## How to Use
+
+### Step 1 — Upload
+- Click **Upload a video** and choose an MP4, MOV, MKV, or AVI file
+- Click **Upload Video**, then **Proceed to Transcription**
+
+### Step 2 — Transcribe
+- Click **🎙️ Transcribe Video**
+- Wait for Groq Whisper to finish (typically under a minute for short videos)
+- Review the transcript in the expander, then click **Proceed to Clip Selection**
+
+### Step 3 — Review Clips
+- AI suggests 3–5 highlight clips with titles, timestamps, and reasons
+- Check/uncheck clips to include, adjust start/end times if needed
+- Click **Proceed to Export**
+
+### Step 4 — Export
+- Toggle optional features:
+  - **Vertical 9:16** — converts to 1080×1920 with a blurred-background fill (looks great on Shorts / TikTok / Reels)
+  - **Animated captions** — burns word-by-word highlighted captions, correctly synced to each clip
+  - **Normalize audio** — evens out loudness to a platform-friendly level
+  - **Background Music** — upload an MP3 and mix at 20% volume
+- Click **🚀 Process & Export Clips**
+- Preview clips in the browser, copy the generated caption (title + description + hashtags), download individually, or download all as ZIP
+- Click **🔄 Start Over** to process a new video
+
+## Project Structure
+
+```
+clipper/
+├── backend/
+│   ├── main.py              # FastAPI server and API endpoints
+│   ├── transcriber.py       # Audio extraction + Groq Whisper
+│   ├── clip_selector.py     # Groq Llama clip selection
+│   ├── video_processor.py   # ffmpeg clip cutting, shorts, music, ZIP
+│   ├── subtitle_generator.py
+│   └── utils.py
+├── frontend/
+│   └── app.py               # Streamlit UI
+├── uploads/                 # Temporary uploaded videos
+├── outputs/                 # Processed clips and ZIPs
+├── music/                   # Uploaded background music
+├── .env                     # API keys (not committed)
+├── requirements.txt
+└── README.md
 ```
 
 ## API Endpoints
 
-### POST /process
-Upload a video and start processing.
+| Method | Endpoint           | Description                    |
+|--------|--------------------|--------------------------------|
+| GET    | `/health`          | Health check                   |
+| POST   | `/upload`          | Upload video or music file     |
+| POST   | `/transcribe`      | Transcribe uploaded video      |
+| POST   | `/select-clips`    | AI clip selection              |
+| POST   | `/process-clips`   | Cut and process clips          |
+| POST   | `/download-zip`    | Download all clips as ZIP      |
+| GET    | `/download/{name}` | Download a single output file  |
 
-**Request:**
-```bash
-curl -X POST "http://localhost:8000/process" \
-  -F "video=@video.mp4" \
-  -F "guidance=find interesting moments"
-```
+## Notes
 
-**Response:**
-```json
-{
-  "job_id": "uuid-string",
-  "message": "Processing started"
-}
-```
-
-### GET /status/{job_id}
-Get current processing status.
-
-**Response:**
-```json
-{
-  "status": "analyzing",
-  "current_step": "Analyzing content (Step 3 of 4)...",
-  "progress": 60,
-  "clips": null,
-  "error": null
-}
-```
-
-### GET /download/{job_id}/{filename}
-Download a generated clip.
-
-### DELETE /cleanup/{job_id}
-Delete temporary files for a job.
-
-### GET /health
-Health check endpoint.
-
-## Processing Pipeline
-
-```
-Upload Video
-    ↓
-[1] Extract Audio (16kHz mono MP3)
-    ↓
-[2] Transcribe (Groq Whisper API)
-    ↓
-[3] Analyze Transcript (Groq Llama 3.3)
-    ↓
-[4] Cut Video Clips (FFmpeg re-encoding)
-    ↓
-Download Clips
-```
-
-## Configuration
-
-### Video Limits
-- **Max File Size**: 500MB
-- **Supported Formats**: MP4, MOV, AVI, MKV
-- **Clip Duration**: 30-180 seconds
-- **Clips Generated**: 4-5 clips per video
-
-### Processing Performance
-- **Audio Extraction**: ~30 seconds (varies by video length)
-- **Transcription**: ~1-2 minutes (Groq API)
-- **Analysis**: ~30 seconds (LLM processing)
-- **Clip Cutting**: ~2-5 minutes (depends on clip count and video codec)
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| GROQ_API_KEY | Yes | - | Groq API key for LLM and Whisper API |
-| BACKEND_URL | No | http://localhost:8000 | Backend API URL for frontend |
-| LOG_LEVEL | No | INFO | Python logging level |
+- Files in `uploads/` and `outputs/` older than 60 minutes are automatically cleaned up
+- All ffmpeg operations use subprocess with full error reporting
+- The app does **not** support YouTube URL downloading — upload local video files only
 
 ## Troubleshooting
 
-### "ffmpeg not found"
-Ensure FFmpeg is installed and in your system PATH.
-
-### "GROQ_API_KEY not set"
-Add your Groq API key to the `.env` file.
-
-### Video upload fails with "File too large"
-Maximum file size is 500MB. Try compressing or splitting your video.
-
-### Transcription returns empty segments
-The audio quality may be poor. Try a video with clearer speech.
-
-### Clips are too short or too long
-The LLM constraints enforce 30-180 second clips. The system may not find enough suitable clips in the transcript.
-
-## Development
-
-### Running Tests
-
-```bash
-cd backend
-pytest tests/
-```
-
-### Code Quality
-
-```bash
-# Format code
-black backend/ frontend/
-
-# Lint
-pylint backend/
-```
-
-## Performance Tips
-
-1. **Use clear, well-spoken content** for better transcription accuracy
-2. **Shorter videos process faster** - videos under 10 minutes are ideal
-3. **Use guided mode** when you know what you're looking for
-4. **Auto mode works best** for educational/interview content
-
-## Limitations
-
-- Requires internet connection for Groq API calls
-- Depends on transcription accuracy for good results
-- Background noise may affect clip quality
-- Non-English content may have reduced accuracy
-- Processing time scales with video length
+| Problem | Solution |
+|---------|----------|
+| `Cannot connect to backend` | Make sure uvicorn is running on port 8000 |
+| `GROQ_API_KEY is not set` | Add your key to `.env` and restart the backend |
+| `ffprobe failed` | Ensure ffmpeg is installed and on PATH |
+| Transcription slow | Large videos take longer; Groq API speed varies |
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Support
-
-For issues and questions:
-- Check the troubleshooting section
-- Review API documentation at `/docs`
-- Check logs in backend console output
-
-## Future Enhancements
-
-- [ ] Multi-language support
-- [ ] Custom clip duration preferences
-- [ ] Batch processing
-- [ ] Clip previews
-- [ ] Custom output formats
-- [ ] AWS/Cloud deployment templates
-- [ ] Advanced filtering by topic/sentiment
-- [ ] Subtitle extraction and editing
+MIT

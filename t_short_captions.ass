@@ -1,0 +1,21 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Base,Arial,106,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,10,1,2,65,65,269,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:00.40,Base,,0,0,0,,{\1c&H0000FFFF&}one{\1c&H00FFFFFF&} two three four five
+Dialogue: 0,0:00:00.40,0:00:00.80,Base,,0,0,0,,one {\1c&H0000FFFF&}two{\1c&H00FFFFFF&} three four five
+Dialogue: 0,0:00:00.80,0:00:01.20,Base,,0,0,0,,one two {\1c&H0000FFFF&}three{\1c&H00FFFFFF&} four five
+Dialogue: 0,0:00:01.20,0:00:01.60,Base,,0,0,0,,one two three {\1c&H0000FFFF&}four{\1c&H00FFFFFF&} five
+Dialogue: 0,0:00:01.60,0:00:02.00,Base,,0,0,0,,one two three four {\1c&H0000FFFF&}five{\1c&H00FFFFFF&}
+Dialogue: 0,0:00:02.00,0:00:02.40,Base,,0,0,0,,{\1c&H0000FFFF&}six{\1c&H00FFFFFF&} seven eight
+Dialogue: 0,0:00:02.40,0:00:02.80,Base,,0,0,0,,six {\1c&H0000FFFF&}seven{\1c&H00FFFFFF&} eight
+Dialogue: 0,0:00:02.80,0:00:03.20,Base,,0,0,0,,six seven {\1c&H0000FFFF&}eight{\1c&H00FFFFFF&}
