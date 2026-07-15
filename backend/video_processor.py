@@ -250,13 +250,38 @@ def apply_visual_cleanup(
         raise RuntimeError(f"Failed to apply visual cleanup: {exc}") from exc
 
 
+def _has_audio_stream(video: Path) -> bool:
+    """Return True if the given media file has at least one audio stream."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(video),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def mix_background_music(
     video_path: str,
     music_path: str,
     output_path: str,
     music_volume: float = 0.12,
 ) -> str:
-    """Mix background music softly under original video audio."""
+    """
+    Mix background music under the original video audio.
+
+    Uses ``amix`` with ``normalize=0`` so the original voice stays at full
+    volume and the music sits underneath at the requested level (the default
+    ffmpeg behaviour normalizes every input, which makes the music almost
+    inaudible). If the clip has no audio track, the music becomes the audio.
+    """
     try:
         video = Path(video_path)
         music = Path(music_path)
@@ -269,15 +294,24 @@ def mix_background_music(
 
         output.parent.mkdir(parents=True, exist_ok=True)
         video_duration = get_video_duration(video)
+        fade_out_start = max(video_duration - 1.0, 0.0)
+        volume = max(0.02, min(0.6, float(music_volume)))
 
-        volume = max(0.02, min(0.35, float(music_volume)))
-        filter_complex = (
+        music_chain = (
             f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{video_duration},"
-            f"afade=t=in:st=0:d=1,afade=t=out:st={max(video_duration - 1, 0)}:d=1,"
-            f"volume={volume}[music];"
-            "[0:a]volume=1.0[voice];"
-            "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            f"afade=t=in:st=0:d=1,afade=t=out:st={fade_out_start}:d=1,"
+            f"volume={volume}[music]"
         )
+
+        if _has_audio_stream(video):
+            filter_complex = (
+                f"{music_chain};"
+                "[0:a][music]amix=inputs=2:duration=first:"
+                "dropout_transition=2:normalize=0[aout]"
+            )
+        else:
+            # No original audio — the looped, trimmed music is the audio track.
+            filter_complex = music_chain.replace("[music]", "[aout]")
 
         cmd = [
             "ffmpeg",
@@ -296,6 +330,8 @@ def mix_background_music(
             "copy",
             "-c:a",
             "aac",
+            "-b:a",
+            "192k",
             "-shortest",
             str(output),
         ]
@@ -311,6 +347,144 @@ def mix_background_music(
         raise
     except Exception as exc:
         raise RuntimeError(f"Failed to mix background music: {exc}") from exc
+
+
+def apply_copyright_safe(
+    input_path: str,
+    output_path: str,
+    mirror: bool = False,
+) -> str:
+    """
+    Apply subtle, quality-preserving transforms that reduce automated
+    copyright/content-ID matching: a small zoom-in crop, a light color grade,
+    and an optional horizontal mirror. These do not change timing, so burned
+    captions stay in sync.
+
+    Note: this reduces fingerprint matching but does NOT grant any legal right
+    to reuse third-party content. Only use on content you own or are licensed
+    to reuse.
+    """
+    try:
+        src = Path(input_path)
+        dst = Path(output_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Input video not found: {input_path}")
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        chain = (
+            "scale=iw*1.06:ih*1.06,"
+            "crop=iw/1.06:ih/1.06,"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            "eq=contrast=1.05:saturation=1.08:brightness=0.02"
+        )
+        if mirror:
+            chain += ",hflip"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-vf",
+            chain,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-c:a",
+            "copy",
+            str(dst),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Copyright-safe transform failed: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+        if not dst.exists():
+            raise RuntimeError("Copyright-safe transform produced no output file")
+        return str(dst)
+    except (FileNotFoundError, RuntimeError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to apply copyright-safe transform: {exc}") from exc
+
+
+def overlay_logo(
+    input_path: str,
+    logo_path: str,
+    output_path: str,
+    position: str = "top_left",
+    scale_width: int = 300,
+) -> str:
+    """
+    Overlay a user-supplied logo/watermark image (PNG with transparency
+    recommended) onto a corner of the video, on top of any existing channel
+    logo. Pair with ``apply_visual_cleanup`` to first mask the original logo.
+    """
+    try:
+        src = Path(input_path)
+        logo = Path(logo_path)
+        dst = Path(output_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Input video not found: {input_path}")
+        if not logo.exists():
+            raise FileNotFoundError(f"Logo image not found: {logo_path}")
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        margin = 40
+        positions = {
+            "top_left": f"x={margin}:y={margin}",
+            "top_right": f"x=main_w-overlay_w-{margin}:y={margin}",
+            "bottom_left": f"x={margin}:y=main_h-overlay_h-{margin}",
+            "bottom_right": f"x=main_w-overlay_w-{margin}:y=main_h-overlay_h-{margin}",
+        }
+        xy = positions.get(position, positions["top_left"])
+
+        filter_complex = (
+            f"[1:v]scale={int(scale_width)}:-1[lg];"
+            f"[0:v][lg]overlay={xy}:format=auto[v]"
+        )
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-i",
+            str(logo),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-c:a",
+            "copy",
+            str(dst),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Logo overlay failed: {result.stderr.strip() or result.stdout.strip()}"
+            )
+        if not dst.exists():
+            raise RuntimeError("Logo overlay produced no output file")
+        return str(dst)
+    except (FileNotFoundError, RuntimeError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to overlay logo: {exc}") from exc
 
 
 def create_zip(clip_paths: list, zip_output_path: str) -> str:

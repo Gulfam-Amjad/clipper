@@ -5,6 +5,11 @@ import re
 from dotenv import load_dotenv
 from groq import Groq
 
+try:
+    import google.generativeai as genai
+except ImportError:  # Gemini fallback is optional.
+    genai = None
+
 load_dotenv()
 
 BUFFER_SECONDS = 1.5
@@ -195,9 +200,15 @@ def select_clips(
     transcript, complete with a catchy title, a ready-to-post description,
     hashtags, and 0-100 scores.
     """
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key or api_key == "your_groq_api_key_here":
-        raise RuntimeError("GROQ_API_KEY is not set. Add your key to the .env file.")
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if (
+        not groq_api_key
+        or groq_api_key == "your_groq_api_key_here"
+    ) and not gemini_api_key:
+        raise RuntimeError(
+            "No AI provider is configured. Add GROQ_API_KEY or GEMINI_API_KEY to the .env file."
+        )
 
     num_clips = max(1, min(10, int(num_clips)))
     min_length = max(5.0, float(min_length))
@@ -250,16 +261,47 @@ Return a JSON object in this exact shape:
 }}"""
 
     try:
-        client = Groq(api_key=api_key)
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=4096,
-            response_format={"type": "json_object"},
-        )
+        raw = ""
+        provider_errors: list[str] = []
 
-        raw = response.choices[0].message.content or ""
+        if groq_api_key and groq_api_key != "your_groq_api_key_here":
+            try:
+                client = Groq(api_key=groq_api_key)
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.4,
+                    max_tokens=4096,
+                    response_format={"type": "json_object"},
+                )
+                raw = response.choices[0].message.content or ""
+            except Exception as exc:
+                provider_errors.append(f"Groq failed: {exc}")
+
+        if not raw and gemini_api_key:
+            if genai is None:
+                provider_errors.append(
+                    "Gemini fallback unavailable because google-generativeai is not installed."
+                )
+            else:
+                try:
+                    genai.configure(api_key=gemini_api_key)
+                    model = genai.GenerativeModel("gemini-2.0-flash")
+                    response = model.generate_content(
+                        prompt,
+                        generation_config={
+                            "temperature": 0.35,
+                            "max_output_tokens": 4096,
+                            "response_mime_type": "application/json",
+                        },
+                    )
+                    raw = response.text or ""
+                except Exception as exc:
+                    provider_errors.append(f"Gemini failed: {exc}")
+
+        if not raw:
+            raise RuntimeError("; ".join(provider_errors) or "No AI provider returned text.")
+
         cleaned = _strip_markdown_json(raw)
         parsed = json.loads(cleaned)
 

@@ -1,14 +1,15 @@
 # VideoClipper AI
 
-An AI-powered video clipping tool that turns long videos into shareable highlight clips.
+A production-style AI clipping studio that turns long videos or YouTube links into ranked, captioned, platform-ready short clips.
 
 ## What It Does
 
-1. **Upload** a video (MP4, MOV, MKV, AVI)
-2. **Transcribe** the audio using Groq Whisper with word-level timestamps (long videos are automatically chunked)
-3. **Select clips** — Groq Llama 3.3 70B analyzes the transcript and picks the most viral-worthy moments, each with a catchy title, a ready-to-post description, hashtags, and a virality score (1–10). You control how many clips and their length range.
-4. **Export** — ffmpeg cuts each clip, with optional vertical 9:16 conversion (blurred-background fill, no black bars), animated word-by-word captions synced to each clip, audio loudness normalization, and background music
-5. **Download** individual clips (with copy-paste captions) or everything as a ZIP
+1. **Import** a local video (MP4, MOV, MKV, AVI) or paste a YouTube URL
+2. **Transcribe** audio using Groq Whisper with word-level timestamps; long videos are automatically chunked
+3. **Select clips** with Groq Llama 3.3 70B, with optional Gemini Flash fallback when `GEMINI_API_KEY` is configured
+4. **Review** ranked ideas with titles, descriptions, hashtags, timestamps, virality score, hook score, and content score
+5. **Export** fast cuts or polished vertical 9:16 edits with blurred fill, animated captions, audio normalization, visual cleanup, and background music
+6. **Download** individual MP4s or all clips as a ZIP
 
 ## Prerequisites
 
@@ -16,6 +17,8 @@ An AI-powered video clipping tool that turns long videos into shareable highligh
 - **ffmpeg** and **ffprobe** installed and available on your PATH  
   Verify with: `ffmpeg -version` and `ffprobe -version`
 - A **Groq API key** — get one free at [console.groq.com](https://console.groq.com)
+- Optional **Gemini API key** for fallback clip selection — get one at [aistudio.google.com](https://aistudio.google.com)
+- **Node.js 18+** for the React frontend
 
 ## Setup
 
@@ -43,14 +46,23 @@ Create or edit `.env` in the project root:
 
 ```
 GROQ_API_KEY=your_actual_groq_api_key_here
+GEMINI_API_KEY=optional_gemini_key_here
 ```
 
-Replace `your_actual_groq_api_key_here` with your real Groq API key.
+Replace `your_actual_groq_api_key_here` with your real Groq API key. `GEMINI_API_KEY` is optional, but useful as a free fallback if Groq is unavailable or rate-limited.
 
 ### 4. Install dependencies
 
 ```bash
 pip install -r requirements.txt
+```
+
+### 5. Install frontend dependencies
+
+```bash
+cd frontend
+npm install
+cd ..
 ```
 
 ## Running the App
@@ -63,39 +75,38 @@ You need **two terminals** — one for the backend, one for the frontend.
 uvicorn backend.main:app --reload --port 8000
 ```
 
-**Terminal 2 — Frontend (Streamlit):**
+**Terminal 2 — Frontend (React + Vite):**
 
 ```bash
-streamlit run frontend/app.py
+cd frontend
+npm run dev
 ```
 
-Then open the Streamlit URL shown in the terminal (usually `http://localhost:8501`).
+Then open the Vite URL shown in the terminal, usually `http://localhost:5173`.
 
 ## How to Use
 
-### Step 1 — Upload
-- Click **Upload a video** and choose an MP4, MOV, MKV, or AVI file
-- Click **Upload Video**, then **Proceed to Transcription**
+### Step 1 — Import Source
+- Choose a local video, or paste a YouTube URL
+- Click **Upload and Analyze** or **Import YouTube Link**
 
-### Step 2 — Transcribe
-- Click **🎙️ Transcribe Video**
-- Wait for Groq Whisper to finish (typically under a minute for short videos)
-- Review the transcript in the expander, then click **Proceed to Clip Selection**
+### Step 2 — Transcribe and Analyze
+- The app uploads/downloads the source, transcribes it, then asks the AI to find complete, viral-worthy moments
+- Adjust the clip count and length range before generating ideas
 
 ### Step 3 — Review Clips
-- AI suggests 3–5 highlight clips with titles, timestamps, and reasons
-- Check/uncheck clips to include, adjust start/end times if needed
-- Click **Proceed to Export**
+- Review titles, scores, descriptions, hashtags, and timestamps
+- Check/uncheck clips to include and adjust start/end times if needed
 
 ### Step 4 — Export
 - Toggle optional features:
   - **Vertical 9:16** — converts to 1080×1920 with a blurred-background fill (looks great on Shorts / TikTok / Reels)
   - **Animated captions** — burns word-by-word highlighted captions, correctly synced to each clip
   - **Normalize audio** — evens out loudness to a platform-friendly level
-  - **Background Music** — upload an MP3 and mix at 20% volume
-- Click **🚀 Process & Export Clips**
-- Preview clips in the browser, copy the generated caption (title + description + hashtags), download individually, or download all as ZIP
-- Click **🔄 Start Over** to process a new video
+  - **Visual cleanup** — masks a corner logo/name area
+  - **Background Music** — upload audio and mix it softly under the original voice
+- Use **Create Fast Cuts** for quick review or **Render Polished Edits** for final clips
+- Preview clips in the browser, copy captions, download individually, or download all as ZIP
 
 ## Project Structure
 
@@ -109,7 +120,9 @@ clipper/
 │   ├── subtitle_generator.py
 │   └── utils.py
 ├── frontend/
-│   └── app.py               # Streamlit UI
+│   ├── src/                 # React + TypeScript frontend
+│   ├── package.json
+│   └── app.py               # Legacy Streamlit UI fallback
 ├── uploads/                 # Temporary uploaded videos
 ├── outputs/                 # Processed clips and ZIPs
 ├── music/                   # Uploaded background music
@@ -120,28 +133,36 @@ clipper/
 
 ## API Endpoints
 
-| Method | Endpoint           | Description                    |
-|--------|--------------------|--------------------------------|
-| GET    | `/health`          | Health check                   |
-| POST   | `/upload`          | Upload video or music file     |
-| POST   | `/transcribe`      | Transcribe uploaded video      |
-| POST   | `/select-clips`    | AI clip selection              |
-| POST   | `/process-clips`   | Cut and process clips          |
-| POST   | `/download-zip`    | Download all clips as ZIP      |
-| GET    | `/download/{name}` | Download a single output file  |
+| Method | Endpoint             | Description                    |
+|--------|----------------------|--------------------------------|
+| GET    | `/health`            | Health check                   |
+| POST   | `/upload`            | Upload video or music file     |
+| POST   | `/youtube-info`      | Fetch YouTube video metadata   |
+| POST   | `/download-youtube`  | Download a YouTube source      |
+| POST   | `/transcribe`        | Transcribe uploaded video      |
+| POST   | `/select-clips`      | AI clip selection              |
+| POST   | `/process-clips`     | Cut and process clips          |
+| POST   | `/download-zip`      | Download all clips as ZIP      |
+| GET    | `/download/{name}`   | Download a single output file  |
+| GET    | `/preview-upload/{name}` | Preview the imported source |
 
 ## Notes
 
 - Files in `uploads/` and `outputs/` older than 60 minutes are automatically cleaned up
 - All ffmpeg operations use subprocess with full error reporting
-- The app does **not** support YouTube URL downloading — upload local video files only
+- YouTube imports use `yt-dlp`; only download videos you own or have permission to reuse
+- The React frontend can be pointed at another backend with `VITE_API_URL`
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
+| Problem | Solution |
+|---------|----------|
 | `Cannot connect to backend` | Make sure uvicorn is running on port 8000 |
-| `GROQ_API_KEY is not set` | Add your key to `.env` and restart the backend |
+| Frontend cannot call API | Confirm the React app is on port 5173 or set CORS origins in `backend/main.py` |
+| `No AI provider is configured` | Add `GROQ_API_KEY` or `GEMINI_API_KEY` to `.env` and restart backend |
+| YouTube download fails | Update `yt-dlp` with `pip install -U yt-dlp` and confirm ffmpeg is installed |
 | `ffprobe failed` | Ensure ffmpeg is installed and on PATH |
 | Transcription slow | Large videos take longer; Groq API speed varies |
 

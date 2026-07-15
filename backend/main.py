@@ -11,6 +11,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.clip_selector import select_clips
+from backend.services.youtube_downloader import (
+    download_youtube_video,
+    get_video_info,
+    validate_youtube_url,
+)
 from backend.subtitle_generator import burn_captions
 from backend.transcriber import transcribe_video
 from backend.utils import (
@@ -22,12 +27,14 @@ from backend.utils import (
     get_video_duration,
 )
 from backend.video_processor import (
+    apply_copyright_safe,
     apply_visual_cleanup,
     convert_to_shorts,
     create_zip,
     cut_clip,
     mix_background_music,
     normalize_audio,
+    overlay_logo,
 )
 
 load_dotenv()
@@ -48,6 +55,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8501",
         "http://127.0.0.1:8501",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -78,6 +87,10 @@ class ProcessOptions(BaseModel):
     cleanup_position: str = "top_left"
     music_volume: float = 0.12
     music_path: Optional[str] = None
+    copyright_safe: bool = False
+    mirror: bool = False
+    add_logo: bool = False
+    logo_path: Optional[str] = None
 
 
 class ClipInput(BaseModel):
@@ -107,6 +120,10 @@ class DownloadZipRequest(BaseModel):
     clip_paths: list[str]
 
 
+class YouTubeUrlRequest(BaseModel):
+    url: str
+
+
 def _schedule_cleanup(background_tasks: BackgroundTasks) -> None:
     background_tasks.add_task(cleanup_old_files, UPLOADS_DIR)
     background_tasks.add_task(cleanup_old_files, OUTPUTS_DIR)
@@ -115,6 +132,60 @@ def _schedule_cleanup(background_tasks: BackgroundTasks) -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/youtube-info")
+def youtube_info(request: YouTubeUrlRequest) -> dict:
+    valid, message = validate_youtube_url(request.url)
+    if not valid:
+        raise HTTPException(status_code=400, detail=message)
+
+    try:
+        return get_video_info(request.url)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/download-youtube")
+def download_youtube(
+    request: YouTubeUrlRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    valid, message = validate_youtube_url(request.url)
+    if not valid:
+        raise HTTPException(status_code=400, detail=message)
+
+    try:
+        ensure_dirs()
+        job_id = str(uuid.uuid4())
+        staging_dir = UPLOADS_DIR / f"{job_id}_youtube"
+        downloaded = Path(download_youtube_video(request.url, str(staging_dir)))
+
+        dest = UPLOADS_DIR / f"{job_id}.mp4"
+        if dest.exists():
+            dest.unlink()
+        shutil.move(str(downloaded), str(dest))
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+        duration = get_video_duration(dest)
+        info = get_video_info(request.url)
+        _schedule_cleanup(background_tasks)
+
+        return {
+            "job_id": job_id,
+            "filename": dest.name,
+            "duration": duration,
+            "file_path": str(dest),
+            "source": "youtube",
+            "source_url": request.url,
+            "title": info.get("title", "YouTube video"),
+            "uploader": info.get("uploader", "Unknown"),
+            "view_count": info.get("view_count", 0),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/upload")
@@ -128,7 +199,10 @@ async def upload_file(
             raise HTTPException(status_code=400, detail="No filename provided")
 
         ext = Path(file.filename).suffix.lower()
-        allowed = {".mp4", ".mov", ".mkv", ".avi", ".mp3", ".wav", ".m4a"}
+        audio_exts = {".mp3", ".wav", ".m4a"}
+        image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+        video_exts = {".mp4", ".mov", ".mkv", ".avi"}
+        allowed = video_exts | audio_exts | image_exts
         if ext not in allowed:
             raise HTTPException(
                 status_code=400,
@@ -138,7 +212,7 @@ async def upload_file(
         job_id = str(uuid.uuid4())
         unique_name = f"{job_id}{ext}"
 
-        if ext in {".mp3", ".wav", ".m4a"}:
+        if ext in audio_exts:
             dest = MUSIC_DIR / unique_name
         else:
             dest = UPLOADS_DIR / unique_name
@@ -147,7 +221,7 @@ async def upload_file(
             shutil.copyfileobj(file.file, out)
 
         duration = 0.0
-        if ext not in {".mp3", ".wav", ".m4a"}:
+        if ext in video_exts:
             duration = get_video_duration(dest)
 
         if background_tasks:
@@ -249,6 +323,18 @@ def process_clips(
                 precise=want_captions,
             )
 
+            # Copyright-safe transforms run before captions/logo so a mirror
+            # flip never reverses burned text or the overlaid logo.
+            if request.options.copyright_safe or request.options.mirror:
+                safe_out = job_output_dir / f"safe_{current_path.name}"
+                current_path = Path(
+                    apply_copyright_safe(
+                        str(current_path),
+                        str(safe_out),
+                        mirror=request.options.mirror,
+                    )
+                )
+
             if request.options.shorts_format:
                 shorts_path = job_output_dir / f"shorts_{base_name}"
                 current_path = Path(
@@ -261,6 +347,21 @@ def process_clips(
                     apply_visual_cleanup(
                         str(current_path),
                         str(cleanup_out),
+                        position=request.options.cleanup_position,
+                    )
+                )
+
+            if (
+                request.options.add_logo
+                and request.options.logo_path
+                and Path(request.options.logo_path).exists()
+            ):
+                logo_out = job_output_dir / f"logo_{current_path.name}"
+                current_path = Path(
+                    overlay_logo(
+                        str(current_path),
+                        request.options.logo_path,
+                        str(logo_out),
                         position=request.options.cleanup_position,
                     )
                 )
